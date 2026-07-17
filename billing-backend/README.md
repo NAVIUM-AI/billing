@@ -65,6 +65,33 @@ curl http://localhost:8000/health
 | `npm run migrate:up`    | Apply all pending migrations               |
 | `npm run migrate:down`  | Revert the last applied migration          |
 | `npm run migrate:create -- <name>` | Scaffold a new migration file  |
+| `npm run verify:auth`   | Run the automated auth flow check (see below) |
+
+## Verifying auth module
+
+`scripts/verify-auth.sh` exercises the full Task 1.3 auth flow end to
+end — signup, login, `/me` (with and without a token), refresh
+rotation, refresh-reuse detection, and the resulting `refresh_tokens`
+DB state — and prints a PASS/FAIL summary. It signs up a fresh,
+uniquely-emailed test user on every run, so it's safe to re-run
+repeatedly without cleanup. Requires `docker` (Postgres running in the
+`billing-pg` container) and `jq` (`brew install jq` if missing).
+
+In one terminal:
+
+```bash
+npm run dev
+```
+
+In another:
+
+```bash
+npm run verify:auth
+```
+
+Expect: `✓ All 6 checks passed. Auth module is working correctly.`
+(exit code `0`). Any failure prints which check failed and why, and
+exits `1`.
 
 ## Testing signup
 
