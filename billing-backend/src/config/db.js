@@ -25,8 +25,18 @@
  *                           to succeed or fail together.
  */
 
-const { Pool } = require("pg");
+const { Pool, types } = require("pg");
 const env = require("./env");
+
+// By default, node-postgres parses a DATE column (OID 1082) into a JS
+// Date at LOCAL midnight. Since res.json() serializes Dates via
+// .toISOString() (which converts to UTC), a plain calendar date like
+// license_expiry_date = '2030-12-31' silently shifts to
+// '2030-12-30T18:30:00.000Z' on any server whose local timezone is
+// ahead of UTC (e.g. IST). Returning the raw 'YYYY-MM-DD' string
+// instead sidesteps timezone conversion entirely — correct behavior
+// for a value that represents a calendar date, not a point in time.
+types.setTypeParser(types.builtins.DATE, (val) => val);
 
 const pool = new Pool({
   connectionString: env.databaseUrl,
