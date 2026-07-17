@@ -13,7 +13,8 @@
     "verify:rbac": "bash scripts/verify-rbac-settings.sh",
     "verify:vehicles": "bash scripts/verify-vehicles.sh",
     "verify:drivers": "bash scripts/verify-drivers.sh",
-    "verify:customers": "bash scripts/verify-customers.sh"
+    "verify:customers": "bash scripts/verify-customers.sh",
+    "test:pricing": "node scripts/test-pricing-calc.js"
   },
   "keywords": [],
   "author": "",

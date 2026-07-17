@@ -30,6 +30,12 @@ module.exports = Object.freeze({
   "vehicles:write": ["owner", "admin", "accountant", "staff"],
   "drivers:read": ["owner", "admin", "accountant", "staff", "viewer"],
   "drivers:write": ["owner", "admin", "accountant", "staff"],
+  // pricing:write is deliberately narrower than the other :write keys
+  // above — rates are commercially sensitive, and unlike a vehicle or
+  // driver record, an accidental staff edit here changes what every
+  // future invoice charges. Only owner + admin, never staff.
+  "pricing:read": ["owner", "admin", "accountant", "staff", "viewer"],
+  "pricing:write": ["owner", "admin"],
   "trips:read": ["owner", "admin", "accountant", "staff", "viewer"],
   "trips:write": ["owner", "admin", "accountant", "staff"],
   "trips:finalize": ["owner", "admin", "accountant"],
