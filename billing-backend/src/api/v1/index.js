@@ -8,6 +8,7 @@
 const express = require("express");
 
 const authRoutes = require("./auth.routes");
+const pingsRoutes = require("./pings.routes");
 
 const router = express.Router();
 
@@ -16,5 +17,9 @@ router.get("/", (req, res) => {
 });
 
 router.use("/auth", authRoutes);
+
+// Ping routes are a throwaway demo of tenant isolation. Delete once
+// Module 2 tables exist and RLS is proven in production.
+router.use("/pings", pingsRoutes);
 
 module.exports = router;

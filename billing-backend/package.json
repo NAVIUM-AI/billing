@@ -8,7 +8,8 @@
     "migrate:up": "node-pg-migrate up",
     "migrate:down": "node-pg-migrate down",
     "migrate:create": "node-pg-migrate create",
-    "verify:auth": "bash scripts/verify-auth.sh"
+    "verify:auth": "bash scripts/verify-auth.sh",
+    "verify:tenants": "bash scripts/verify-tenant-isolation.sh"
   },
   "keywords": [],
   "author": "",

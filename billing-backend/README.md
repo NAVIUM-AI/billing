@@ -37,6 +37,23 @@ Backend API for a multi-tenant billing SaaS.
    createdb billing_dev
    ```
 
+   The app connects as a dedicated, non-superuser role (`billing_app`
+   by default) rather than your own Postgres superuser — this matters
+   because Postgres row-level security (see "Verifying tenant
+   isolation" below) is always bypassed for superusers, no matter what
+   policies are defined. Create the role and let it own the schema:
+
+   ```bash
+   psql -d billing_dev -c "CREATE ROLE billing_app WITH LOGIN PASSWORD 'changeme' NOSUPERUSER;"
+   psql -d billing_dev -c "GRANT USAGE, CREATE ON SCHEMA public TO billing_app;"
+   ```
+
+   Then point `DATABASE_URL` in `.env` at that role:
+
+   ```
+   DATABASE_URL=postgresql://billing_app:changeme@localhost:5432/billing_dev
+   ```
+
 4. Run migrations to create the schema:
 
    ```bash
@@ -66,6 +83,7 @@ curl http://localhost:8000/health
 | `npm run migrate:down`  | Revert the last applied migration          |
 | `npm run migrate:create -- <name>` | Scaffold a new migration file  |
 | `npm run verify:auth`   | Run the automated auth flow check (see below) |
+| `npm run verify:tenants` | Run the automated tenant isolation check (see below) |
 
 ## Verifying auth module
 
@@ -92,6 +110,54 @@ npm run verify:auth
 Expect: `✓ All 6 checks passed. Auth module is working correctly.`
 (exit code `0`). Any failure prints which check failed and why, and
 exits `1`.
+
+## Verifying tenant isolation
+
+`scripts/verify-tenant-isolation.sh` exercises the Task 1.4 multi-tenant
+isolation layer end to end: it signs up two separate tenants, creates
+pings for each, and checks that every tenant only ever sees its own
+rows — via the normal `GET /pings` endpoint, via the deliberately
+WHERE-less `GET /pings/leak-test` endpoint, and via a direct `psql`
+connection as the app's own database role (bypassing the API and
+Express middleware entirely). It prints a PASS/FAIL summary. Requires
+`psql` (connecting to the same local Postgres instance the app uses)
+and `jq` (`brew install jq` if missing).
+
+In one terminal:
+
+```bash
+npm run dev
+```
+
+In another:
+
+```bash
+npm run verify:tenants
+```
+
+Expect: `✓ All 4 checks passed. Tenant isolation is enforced at both the
+application and database layers.` (exit code `0`).
+
+This proves multi-tenant data isolation is enforced at **two**
+independent layers, not just one:
+
+- **Application layer** — `tenantContext` middleware
+  (`src/middleware/tenantContext.js`) sets a Postgres session variable
+  (`app.current_tenant_id`) from the caller's JWT on every request, and
+  `req.db.queryAsTenant()` / `req.db.withTenantContext()`
+  (`src/config/db.js`) are the only way route handlers are meant to
+  query tenant-scoped tables — so a route can't forget to scope a
+  query.
+- **Database layer** — a Postgres row-level security policy on
+  `tenant_pings` (see the `enable_rls_and_ping` migration) filters rows
+  by that same session variable, and `FORCE ROW LEVEL SECURITY` makes
+  the policy apply even to the role that owns the table. So even a bug
+  that produces a query with no `WHERE tenant_id = ...` at all — like
+  `/pings/leak-test` — still can't return another tenant's data. The
+  direct-`psql` check in the script goes a step further: it proves
+  that connecting as the app's own database role with **no** session
+  variable set returns zero rows, i.e. secure-by-default even without
+  the middleware in the picture at all.
 
 ## Testing signup
 
