@@ -211,6 +211,8 @@ of that file; if you change one, update the other.
 | `vehicles:write`         |   ✅   |   ✅   |     ✅      |   ✅   |        |
 | `drivers:read`           |   ✅   |   ✅   |     ✅      |   ✅   |   ✅    |
 | `drivers:write`          |   ✅   |   ✅   |     ✅      |   ✅   |        |
+| `pricing:read`           |   ✅   |   ✅   |     ✅      |   ✅   |   ✅    |
+| `pricing:write`          |   ✅   |   ✅   |            |       |        |
 | `trips:read`             |   ✅   |   ✅   |     ✅      |   ✅   |   ✅    |
 | `trips:write`            |   ✅   |   ✅   |     ✅      |   ✅   |        |
 | `trips:finalize`         |   ✅   |   ✅   |     ✅      |       |        |
@@ -224,10 +226,15 @@ of that file; if you change one, update the other.
 
 Notes:
 
-- `vehicles:*` (Task 2.1) and `drivers:*` (Task 2.2) are live. `customers:*`,
-  `trips:*`, `invoices:*`, `payments:*`, and `reports:*` remain
-  placeholders for later Module 2+ tasks — defined now so those tasks
-  reference an existing key instead of scattering new role logic.
+- `vehicles:*` (Task 2.1), `drivers:*` (Task 2.2), `customers:*` (Task
+  2.3), and `pricing:*` (Task 2.4) are live. `trips:*`, `invoices:*`,
+  `payments:*`, and `reports:*` remain placeholders for later Module 3+
+  tasks — defined now so those tasks reference an existing key instead
+  of scattering new role logic.
+- `pricing:write` is narrower than the other `:write` keys — only
+  `owner`/`admin`, never `staff`. Pricing rates are commercially
+  sensitive and rate-immutability (see "Versioning of pricing rules"
+  below) only means something if write access is tightly held.
 - There is exactly one `owner` per tenant, set at signup. Owner status
   can never be granted or removed through `POST /users` or
   `PATCH /users/:userId/role` (both reject `role: "owner"` at the
