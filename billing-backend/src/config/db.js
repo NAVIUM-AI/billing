@@ -5,8 +5,24 @@
  * new client per request — pooling reuses connections, which matters once
  * we have concurrent requests hitting Postgres.
  *
- * All raw SQL queries should go through the exported `query()` helper so
- * we have one place to add logging/metrics later if needed.
+ * Tenant isolation (row-level security, see the `enable_rls_and_ping`
+ * migration) is enforced by a Postgres session variable,
+ * `app.current_tenant_id`. That variable MUST be set with `SET LOCAL`
+ * inside a transaction, never plain `SET`: pool connections are reused
+ * across unrelated requests, so a plain `SET` would leak one request's
+ * tenant into whichever request happens to grab that same connection
+ * next. `SET LOCAL` is scoped to the current transaction and is
+ * automatically cleared on COMMIT/ROLLBACK, so every request starts
+ * clean regardless of which pooled connection it lands on.
+ *
+ * Three ways to run queries, pick based on what the query needs:
+ *   - query()             → tenant-agnostic ops (login, signup, health
+ *                           check) — anything that must work with no
+ *                           tenant context at all, e.g. looking a user
+ *                           up by email before we know their tenant.
+ *   - queryAsTenant()     → a single tenant-scoped read/write.
+ *   - withTenantContext() → multiple tenant-scoped statements that need
+ *                           to succeed or fail together.
  */
 
 const { Pool } = require("pg");
@@ -33,4 +49,56 @@ function query(text, params) {
   return pool.query(text, params);
 }
 
-module.exports = { pool, query };
+/**
+ * Checks out a client, sets the tenant session variable for the
+ * duration of a transaction, runs `fn(client)`, then commits. Use this
+ * when a route needs more than one tenant-scoped statement to succeed
+ * or fail as a unit (see auth.service.js's signup/refresh for the same
+ * BEGIN/COMMIT/ROLLBACK pattern without tenant context).
+ *
+ * @template T
+ * @param {string} tenantId
+ * @param {(client: import('pg').PoolClient) => Promise<T>} fn
+ * @returns {Promise<T>}
+ */
+async function withTenantContext(tenantId, fn) {
+  if (!tenantId) {
+    throw new Error("withTenantContext requires tenantId");
+  }
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    // set_config's third arg (is_local=true) is the functional
+    // equivalent of `SET LOCAL app.current_tenant_id = $1` — we use the
+    // function form because `SET LOCAL` doesn't support query
+    // parameters, and string-interpolating tenantId directly into SQL
+    // would be a SQL-injection risk.
+    await client.query(
+      "SELECT set_config('app.current_tenant_id', $1, true)",
+      [tenantId],
+    );
+    const result = await fn(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Convenience wrapper for the common case: one tenant-scoped query, no
+ * other statements needed in the same transaction.
+ *
+ * @param {string} tenantId
+ * @param {string} text
+ * @param {Array<*>} [params]
+ * @returns {Promise<import('pg').QueryResult>}
+ */
+async function queryAsTenant(tenantId, text, params) {
+  return withTenantContext(tenantId, (client) => client.query(text, params));
+}
+
+module.exports = { pool, query, withTenantContext, queryAsTenant };

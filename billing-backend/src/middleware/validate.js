@@ -30,7 +30,21 @@ function validate(schema, source = "body") {
 
     // Replace with the validated/coerced value so downstream code (the
     // service layer) always gets clean, predictable data.
-    req[source] = value;
+    //
+    // req.query is special in Express 5: it's defined as a getter that
+    // re-parses req.url on every access (see express/lib/request.js),
+    // not a plain writable property like req.body/req.params. A plain
+    // `req.query = value` assignment is a silent no-op there (no error,
+    // no effect) — coercion and Joi .default() values would otherwise
+    // vanish and handlers would keep seeing raw query-string strings.
+    // Object.defineProperty replaces the accessor outright, which works
+    // for all three sources.
+    Object.defineProperty(req, source, {
+      value,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
     next();
   };
 }
