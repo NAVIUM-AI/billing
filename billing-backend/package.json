@@ -1,0 +1,29 @@
+{
+  "name": "billing-backend",
+  "version": "1.0.0",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "nodemon src/server.js",
+    "start": "node src/server.js",
+    "migrate:up": "node-pg-migrate up",
+    "migrate:down": "node-pg-migrate down",
+    "migrate:create": "node-pg-migrate create"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "Multi-tenant billing SaaS backend.",
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "helmet": "^8.3.0",
+    "pg": "^8.22.0"
+  },
+  "devDependencies": {
+    "eslint": "^10.7.0",
+    "node-pg-migrate": "^9.0.0",
+    "nodemon": "^3.1.14",
+    "prettier": "^3.9.5"
+  }
+}
