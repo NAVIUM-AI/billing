@@ -85,6 +85,7 @@ curl http://localhost:8000/health
 | `npm run verify:auth`   | Run the automated auth flow check (see below) |
 | `npm run verify:tenants` | Run the automated tenant isolation check (see below) |
 | `npm run verify:rbac`    | Run the automated RBAC + settings + user management check (see below) |
+| `npm run verify:vehicles` | Run the automated vehicle master module check (see below) |
 
 ## Verifying auth module
 
@@ -232,6 +233,66 @@ Notes:
   `error.details.role` (the caller's role), so the frontend can show a
   specific "you need X permission" message instead of a generic
   "forbidden".
+
+## Verifying vehicles
+
+`scripts/verify-vehicles.sh` exercises the Task 2.1 vehicle master
+module end to end: creation and number normalization, duplicate
+detection (including across formatting variants and against archived
+records), validation, list/search/type filtering, cross-tenant
+isolation (both via the API and directly at the DB layer), RBAC (staff
+can write, viewer cannot — checked against the access matrix), and
+archive/unarchive idempotence. Prints a PASS/FAIL summary. Requires
+`psql` and `jq` (`brew install jq` if missing).
+
+In one terminal:
+
+```bash
+npm run dev
+```
+
+In another:
+
+```bash
+npm run verify:vehicles
+```
+
+Expect: `✓ All 21 checks passed. Vehicle master module is working
+correctly.` (exit code `0`).
+
+### Vehicle number: canonical vs display
+
+Every vehicle is stored with two forms of its registration number
+(`src/utils/vehicleNumber.js`):
+
+- **`vehicle_number`** (canonical) — uppercase, no separators, e.g.
+  `KA51AK1031`. This is the only form ever used for lookups, the
+  per-tenant uniqueness constraint, and duplicate detection, so
+  `"KA 51 AK 1031"`, `"KA-51-AK-1031"`, and `"ka51ak1031"` are all
+  recognized as the same vehicle.
+- **`vehicle_number_display`** — exactly what the user typed at
+  creation time. Shown back in the UI/invoices because
+  `"KA 51 AK 1031"` reads better than the canonical form; never used
+  for lookups.
+
+`vehicle_number` is **immutable** after creation — trip sheets and
+invoices (Module 2+) will reference a vehicle by identity, so editing
+it later would silently rewrite history. If a number was entered
+wrong, archive the vehicle and create a new one; there is no "edit
+vehicle number" endpoint by design.
+
+There is also no hard-delete endpoint — `DELETE /vehicles/:id` returns
+`404` because the route simply isn't registered. Archiving
+(`POST /vehicles/:id/archive`) is the supported way to retire a
+vehicle; it's reversible (`POST /vehicles/:id/unarchive`) and
+idempotent (archiving an already-archived vehicle just returns its
+current state, no error).
+
+Only the standard Indian civilian registration format
+(`AA##A[AA]####`, e.g. `KA51AK1031`) is accepted today. The newer
+"Bharat series" format (e.g. `22BH1234A`) and defence/military plates
+are not supported yet — flagged as future work in
+`vehicleNumber.js`.
 
 ## Testing signup
 
