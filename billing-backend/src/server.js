@@ -6,13 +6,10 @@
  * future tests).
  */
 
-require("dotenv").config();
-
+const env = require("./config/env");
 const app = require("./app");
 const logger = require("./utils/logger");
 
-const PORT = process.env.PORT || 8000;
-
-app.listen(PORT, () => {
-  logger.info(`Server listening on port ${PORT}`);
+app.listen(env.port, () => {
+  logger.info(`Server listening on port ${env.port}`);
 });

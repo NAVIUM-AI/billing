@@ -10,9 +10,10 @@
  */
 
 const { Pool } = require("pg");
+const env = require("./env");
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: env.databaseUrl,
 });
 
 // Without this listener, an error on an idle client (e.g. the DB restarting)

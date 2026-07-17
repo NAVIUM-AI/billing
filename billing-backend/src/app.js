@@ -17,6 +17,7 @@
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
+const cookieParser = require("cookie-parser");
 
 const v1Router = require("./api/v1");
 const errorHandler = require("./middleware/errorHandler");
@@ -29,6 +30,9 @@ const app = express();
 app.use(helmet());
 app.use(cors());
 app.use(express.json());
+// Parses the refresh_token cookie into req.cookies for auth.routes.js —
+// must run before the /api/v1 mount, since that's where it's read.
+app.use(cookieParser());
 
 // Simple liveness/readiness check — used by load balancers, uptime
 // monitors, and by us to verify the server booted correctly.

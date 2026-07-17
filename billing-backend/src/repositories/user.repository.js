@@ -71,4 +71,33 @@ async function insertUser(
   return result.rows[0];
 }
 
-module.exports = { findByEmailAndTenant, findByEmail, insertUser };
+/**
+ * @param {string} userId
+ * @param {import('pg').PoolClient} [client]
+ * @returns {Promise<void>}
+ */
+async function touchLastLogin(userId, client) {
+  const runner = client || pool;
+  await runner.query("UPDATE users SET last_login_at = NOW() WHERE id = $1", [
+    userId,
+  ]);
+}
+
+/**
+ * @param {string} id
+ * @param {import('pg').PoolClient} [client]
+ * @returns {Promise<object|null>} full row, including password_hash — callers must strip it before returning to a client
+ */
+async function findById(id, client) {
+  const runner = client || pool;
+  const result = await runner.query("SELECT * FROM users WHERE id = $1", [id]);
+  return result.rows[0] || null;
+}
+
+module.exports = {
+  findByEmailAndTenant,
+  findByEmail,
+  findById,
+  insertUser,
+  touchLastLogin,
+};

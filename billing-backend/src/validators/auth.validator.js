@@ -35,4 +35,13 @@ const signupSchema = Joi.object({
   stateCode: Joi.string().length(2).uppercase().optional(),
 });
 
-module.exports = { signupSchema };
+const loginSchema = Joi.object({
+  email: Joi.string().email().trim().lowercase().required(),
+
+  // No complexity rules here — that's a signup-time concern. At login
+  // we're just checking a password against a stored hash; rejecting a
+  // correct-but-"weak-looking" password here would just be confusing.
+  password: Joi.string().required(),
+});
+
+module.exports = { signupSchema, loginSchema };
