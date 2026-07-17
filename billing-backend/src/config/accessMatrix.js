@@ -28,6 +28,8 @@ module.exports = Object.freeze({
   "customers:write": ["owner", "admin", "accountant", "staff"],
   "vehicles:read": ["owner", "admin", "accountant", "staff", "viewer"],
   "vehicles:write": ["owner", "admin", "accountant", "staff"],
+  "drivers:read": ["owner", "admin", "accountant", "staff", "viewer"],
+  "drivers:write": ["owner", "admin", "accountant", "staff"],
   "trips:read": ["owner", "admin", "accountant", "staff", "viewer"],
   "trips:write": ["owner", "admin", "accountant", "staff"],
   "trips:finalize": ["owner", "admin", "accountant"],

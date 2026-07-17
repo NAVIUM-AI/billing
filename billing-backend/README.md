@@ -86,6 +86,7 @@ curl http://localhost:8000/health
 | `npm run verify:tenants` | Run the automated tenant isolation check (see below) |
 | `npm run verify:rbac`    | Run the automated RBAC + settings + user management check (see below) |
 | `npm run verify:vehicles` | Run the automated vehicle master module check (see below) |
+| `npm run verify:drivers` | Run the automated driver master module check (see below) |
 
 ## Verifying auth module
 
@@ -207,6 +208,8 @@ of that file; if you change one, update the other.
 | `customers:write`        |   ✅   |   ✅   |     ✅      |   ✅   |        |
 | `vehicles:read`          |   ✅   |   ✅   |     ✅      |   ✅   |   ✅    |
 | `vehicles:write`         |   ✅   |   ✅   |     ✅      |   ✅   |        |
+| `drivers:read`           |   ✅   |   ✅   |     ✅      |   ✅   |   ✅    |
+| `drivers:write`          |   ✅   |   ✅   |     ✅      |   ✅   |        |
 | `trips:read`             |   ✅   |   ✅   |     ✅      |   ✅   |   ✅    |
 | `trips:write`            |   ✅   |   ✅   |     ✅      |   ✅   |        |
 | `trips:finalize`         |   ✅   |   ✅   |     ✅      |       |        |
@@ -220,9 +223,10 @@ of that file; if you change one, update the other.
 
 Notes:
 
-- `customers:*` through `reports:*` are placeholders for Module 2+ —
-  defined now so future tasks reference an existing key instead of
-  scattering new role logic.
+- `vehicles:*` (Task 2.1) and `drivers:*` (Task 2.2) are live. `customers:*`,
+  `trips:*`, `invoices:*`, `payments:*`, and `reports:*` remain
+  placeholders for later Module 2+ tasks — defined now so those tasks
+  reference an existing key instead of scattering new role logic.
 - There is exactly one `owner` per tenant, set at signup. Owner status
   can never be granted or removed through `POST /users` or
   `PATCH /users/:userId/role` (both reject `role: "owner"` at the
@@ -293,6 +297,58 @@ Only the standard Indian civilian registration format
 "Bharat series" format (e.g. `22BH1234A`) and defence/military plates
 are not supported yet — flagged as future work in
 `vehicleNumber.js`.
+
+## Verifying drivers
+
+`scripts/verify-drivers.sh` exercises the Task 2.2 driver master module
+end to end: creation with phone/license normalization, duplicate
+detection across both phone and license independently (including
+across formatting variants), optional-field semantics (multiple
+drivers with no phone or no license coexisting), validation,
+list/search, cross-tenant isolation (API + DB layer), RBAC (staff can
+write), and archive/unarchive. Prints a PASS/FAIL summary. Requires
+`psql` and `jq` (`brew install jq` if missing).
+
+In one terminal:
+
+```bash
+npm run dev
+```
+
+In another:
+
+```bash
+npm run verify:drivers
+```
+
+Expect: `✓ All 17 checks passed. Driver master module is working
+correctly.` (exit code `0`).
+
+### Phone number: canonical vs display, and optional fields
+
+Same canonical/display split as `vehicle_number` (Task 2.1), applied to
+phone numbers (`src/utils/phoneNumber.js`):
+
+- **`phone`** (canonical) — digits only, with the `91` country code
+  prefixed for Indian mobiles, e.g. `919876543210`. Used for lookups
+  and the per-tenant uniqueness check, so `"+91 98765 43210"`,
+  `"098765-43210"`, and `"9876543210"` all normalize to the same
+  record.
+- **`phone_display`** — exactly what the user typed. Shown back in the
+  UI; never used for lookups.
+
+Unlike a vehicle's registration number, a driver's `phone` and
+`license_number` are **both fully optional, and both editable** —
+agencies that don't formally track a driver's phone or license can
+still create a driver record with just a name, and either field can be
+added or corrected later. When present, each is unique per tenant
+(enforced by a partial unique index so any number of drivers can share
+a `NULL` phone or `NULL` license at the same time — see the drivers
+migration). Only the standard Indian mobile format is validated
+strictly today; other formats fall back to a loose 10–15 digit check
+(see the top-of-file comment in `phoneNumber.js` for the plan to swap
+in `libphonenumber-js` if stricter international validation is ever
+needed).
 
 ## Testing signup
 
