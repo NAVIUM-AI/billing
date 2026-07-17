@@ -87,6 +87,7 @@ curl http://localhost:8000/health
 | `npm run verify:rbac`    | Run the automated RBAC + settings + user management check (see below) |
 | `npm run verify:vehicles` | Run the automated vehicle master module check (see below) |
 | `npm run verify:drivers` | Run the automated driver master module check (see below) |
+| `npm run verify:customers` | Run the automated customer master module check (see below) |
 
 ## Verifying auth module
 
@@ -349,6 +350,76 @@ strictly today; other formats fall back to a loose 10–15 digit check
 (see the top-of-file comment in `phoneNumber.js` for the plan to swap
 in `libphonenumber-js` if stricter international validation is ever
 needed).
+
+## Verifying customers
+
+`scripts/verify-customers.sh` exercises the Task 2.3 customer master
+module end to end: B2C/B2B polymorphism with conditional required
+fields, GSTIN format validation + state-code cross-check +
+auto-derivation, duplicate detection (GSTIN and phone, across
+formatting/case variants), list/search/filter, cross-tenant isolation
+(API + DB layer, across both `customers` and `customer_contacts`), the
+B2B-only contacts sub-resource (including atomic primary-contact
+flipping), immutable `customer_type`, and archive/unarchive. Prints a
+PASS/FAIL summary. Requires `psql` and `jq` (`brew install jq` if
+missing).
+
+In one terminal:
+
+```bash
+npm run dev
+```
+
+In another:
+
+```bash
+npm run verify:customers
+```
+
+Expect: `✓ All 24 checks passed. Customer master module is working
+correctly.` (exit code `0`).
+
+### B2C vs B2B: one table, conditional requirements
+
+A single `customers` table holds both individual (B2C) and business
+(B2B) customers, distinguished by `customer_type`. Which fields are
+required depends on the type, enforced at **both** the application
+layer (Joi + `customer.service.js`) and the database layer (CHECK
+constraints — belt and suspenders, same principle as RLS):
+
+| | B2C | B2B |
+| --- | --- | --- |
+| `name` | **required** | optional (primary billing contact name) |
+| `company_name` | must be absent | **required** |
+| `gstin` | optional | **required** |
+| `state_code` | optional | **required** (auto-derived from `gstin` if omitted) |
+| Contacts sub-resource | not available (400 `CONTACTS_B2B_ONLY`) | available |
+
+`customer_type` is **immutable** after creation — switching a customer
+between B2C and B2B later would invalidate the required-fields
+assumptions every past invoice was built on. There is no
+"convert customer type" endpoint by design; `PATCH` rejects any
+request that includes `customer_type` at all with `VALIDATION_ERROR`.
+
+### GSTIN state-code cross-check
+
+A GSTIN's first two digits encode the state it was issued in
+(`src/utils/gstin.js` — format and state-code validation only; portal
+verification against the actual GST department is a later
+integration). For a B2B customer:
+
+- If `gstin` is provided and `state_code` is not, `state_code` is
+  **auto-derived** from the GSTIN.
+- If both are provided, they must agree — a mismatch (e.g. a Karnataka
+  GSTIN paired with `state_code: "MH"`) is rejected with
+  `400 GSTIN_STATE_MISMATCH` and the response includes both the
+  GSTIN-derived state and the state that was submitted, so the caller
+  can see exactly what disagreed.
+
+This matters beyond data hygiene: `state_code` drives IGST vs.
+CGST+SGST calculation at invoice time (Module 4), so a customer record
+with a self-contradictory state would silently produce the wrong tax
+split on every invoice raised against it.
 
 ## Testing signup
 
