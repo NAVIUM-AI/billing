@@ -14,10 +14,13 @@
   "license": "ISC",
   "description": "Multi-tenant billing SaaS backend.",
   "dependencies": {
+    "bcrypt": "^6.0.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "helmet": "^8.3.0",
+    "http-errors": "^2.0.1",
+    "joi": "^18.2.3",
     "pg": "^8.22.0"
   },
   "devDependencies": {

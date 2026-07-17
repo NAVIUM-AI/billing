@@ -57,16 +57,66 @@ curl http://localhost:8000/health
 | `npm run migrate:down`  | Revert the last applied migration          |
 | `npm run migrate:create -- <name>` | Scaffold a new migration file  |
 
+## Testing signup
+
+`POST /api/v1/auth/signup` creates a new tenant and its first (owner)
+user in one transaction. Both are returned; the user is never returned
+with its `password_hash`.
+
+**Happy path:**
+
+```bash
+curl -X POST http://localhost:8000/api/v1/auth/signup \
+  -H "Content-Type: application/json" \
+  -d '{
+    "businessName": "Acme Travels",
+    "email": "owner@acme.com",
+    "password": "Passw0rd123",
+    "fullName": "Anil Owner",
+    "gstin": "29ABCDE1234F1Z5",
+    "stateCode": "KA"
+  }'
+```
+
+Expected: `201` with `{ "tenant": {...}, "user": {...} }` — the `user`
+object must NOT have a `password_hash` field.
+
+**Duplicate email:**
+
+Run the exact same command again.
+
+Expected: `409` with
+
+```json
+{ "error": { "code": "EMAIL_ALREADY_EXISTS", "message": "..." } }
+```
+
+**Validation error:**
+
+```bash
+curl -X POST http://localhost:8000/api/v1/auth/signup \
+  -H "Content-Type: application/json" \
+  -d '{ "email": "not-an-email" }'
+```
+
+Expected: `400` with
+
+```json
+{ "error": { "code": "VALIDATION_ERROR", "message": "...", "details": { "fields": [...] } } }
+```
+
 ## Project structure
 
 ```
 src/
-├── config/       # DB connection, env-derived config
-├── api/v1/       # Versioned API routes
-├── middleware/    # Express middleware (auth, validation, etc.)
-├── services/      # Business logic
-├── utils/         # Logger and other helpers
-├── app.js         # Express app setup (middleware, routes)
-└── server.js       # Entry point — starts the HTTP server
-migrations/        # node-pg-migrate SQL migrations
+├── config/         # DB connection, env-derived config
+├── api/v1/         # Versioned API routes (thin — validate, call service, respond)
+├── services/       # Business logic (transactions, orchestration)
+├── repositories/    # SQL, one file per table
+├── validators/      # Joi schemas
+├── middleware/      # Express middleware (validation, error handling, etc.)
+├── utils/           # Logger, password hashing, slugify, error helpers
+├── app.js           # Express app setup (middleware, routes)
+└── server.js         # Entry point — starts the HTTP server
+migrations/          # node-pg-migrate SQL migrations
 ```

@@ -4,6 +4,14 @@
  * This file only builds and configures the app (middleware, routes,
  * error handling) — it does NOT start listening on a port. That split
  * lets us import `app` in tests later without binding a real socket.
+ *
+ * Note on async errors: the task called for `express-async-errors`, but
+ * this project is on Express 5 (installed in Task 1.1), which forwards
+ * rejected promises from async route/middleware handlers to the error
+ * handler natively. `express-async-errors` only patches Express 4's
+ * router and declares a peer dependency on it, so installing it here
+ * would conflict with Express 5 and add nothing — async throws already
+ * reach errorHandler.js below without it.
  */
 
 const express = require("express");
@@ -11,7 +19,8 @@ const cors = require("cors");
 const helmet = require("helmet");
 
 const v1Router = require("./api/v1");
-const logger = require("./utils/logger");
+const errorHandler = require("./middleware/errorHandler");
+const { apiError } = require("./utils/httpError");
 
 const app = express();
 
@@ -29,17 +38,16 @@ app.get("/health", (req, res) => {
 
 app.use("/api/v1", v1Router);
 
-// 404 handler — anything that didn't match a route above.
-app.use((req, res) => {
-  res.status(404).json({ error: "Not found" });
+// 404 handler — anything that didn't match a route above. Throwing here
+// (rather than writing the response directly) routes it through
+// errorHandler.js so 404s get the same { error: { code, message } }
+// shape as every other error.
+app.use((req, res, next) => {
+  next(apiError(404, "NOT_FOUND", "Resource not found"));
 });
 
-// Global error handler. Must be defined with 4 args (err, req, res, next)
-// so Express recognizes it as an error-handling middleware.
-// eslint-disable-next-line no-unused-vars
-app.use((err, req, res, next) => {
-  logger.error("Unhandled error", { message: err.message, stack: err.stack });
-  res.status(err.status || 500).json({ error: "Internal server error" });
-});
+// Must be mounted LAST, after all routes, so it catches everything
+// above — see errorHandler.js for the response shape and logging rules.
+app.use(errorHandler);
 
 module.exports = app;
