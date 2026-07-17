@@ -9,7 +9,8 @@
     "migrate:down": "node-pg-migrate down",
     "migrate:create": "node-pg-migrate create",
     "verify:auth": "bash scripts/verify-auth.sh",
-    "verify:tenants": "bash scripts/verify-tenant-isolation.sh"
+    "verify:tenants": "bash scripts/verify-tenant-isolation.sh",
+    "verify:rbac": "bash scripts/verify-rbac-settings.sh"
   },
   "keywords": [],
   "author": "",
