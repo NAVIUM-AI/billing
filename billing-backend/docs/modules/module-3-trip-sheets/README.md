@@ -29,4 +29,15 @@ Task 3.1 shipped the `trip_sheets` base table, tenant-scoped FY-based trip sheet
 - Snapshot fields (`snap_*`) are NEVER touched by PATCH — rate immutability is preserved (ADR-005) even through draft editing.
 - `markTripInvoiced` service function reserved for Module 4; no API endpoint exposes it.
 
+## Task 3.4: Trip listing + filters + aggregates
+
+- `GET /trips` with composable filters: `customer_id`, `vehicle_id`, `driver_id`, `from_date`/`to_date`, `status` (comma-separated multi-value), `service_type`, `billing_mode`, `search` (substring on `trip_sheet_number` and the snapshot customer name).
+- Pagination: `limit` (1-100, default 25), `offset`; response includes `pagination.has_more`.
+- Aggregates (`sum_net_payable_paise`, `sum_gross_paise`, `count_by_status`) are computed over the **filtered set**, not just the current page — verified by requesting `limit=1` and confirming the aggregates match the unpaginated totals.
+- Sort: whitelisted keys only (`trip_date` default, `created_at`, `total_km`, `net_payable_paise`) × `asc`/`desc` — enforced at both the Joi validator (fail early) and again in the repository (defense in depth); an unrecognized `sort_by` is a 400 at the validator, and would be a thrown `Error` (500), not a silently-accepted column, if it ever reached the repository.
+- `includeCancelled` defaults to `false` (mirrors the master-data `includeArchived` pattern); an explicit `status` filter always overrides the default.
+- The repository builds one `WHERE` clause array and reuses it verbatim for both the paginated data query and the aggregates query — no copy-pasted second WHERE string to drift out of sync as filters are added.
+- List response is deliberately lean: omits `breakdown`, every `snap_*` field, and `tolls` to keep payload size down for ops browsing; `GET /trips/:id` remains the source for full detail.
+- `verify:trips-list` — 30/30, full Module 1-3 regression suite maintained.
+
 No full docs pass in this task. Module 3 comprehensive docs come at Task 3.6 (parallel to Task 2.5 for Module 2).

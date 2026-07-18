@@ -18,7 +18,8 @@
     "verify:pricing": "bash scripts/verify-pricing.sh",
     "verify:trips-local": "bash scripts/verify-trip-sheet-local.sh",
     "verify:trips-outstation": "bash scripts/verify-trip-sheet-outstation.sh",
-    "verify:trips-lifecycle": "bash scripts/verify-trip-sheet-lifecycle.sh"
+    "verify:trips-lifecycle": "bash scripts/verify-trip-sheet-lifecycle.sh",
+    "verify:trips-list": "bash scripts/verify-trip-sheet-list.sh"
   },
   "keywords": [],
   "author": "",

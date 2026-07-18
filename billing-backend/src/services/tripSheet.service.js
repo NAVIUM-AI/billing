@@ -21,7 +21,7 @@
 
 const { calculate, DomainInputError } = require("../domain/pricing");
 const { isValidTransition, allowedTransitions } = require("../domain/tripLifecycle");
-const { rupeesToPaise } = require("../utils/money");
+const { rupeesToPaise, formatINR } = require("../utils/money");
 const { toIndianFY } = require("../utils/fiscalYear");
 const tsn = require("../utils/tripSheetNumber");
 const tripRepo = require("../repositories/tripSheet.repository");
@@ -770,6 +770,85 @@ async function markTripInvoiced(tenantId, id, invoiceId, actorUserId, db) {
   });
 }
 
+/**
+ * GET /trips — filtered, sorted, paginated list plus aggregates for the
+ * filtered set (not just the current page). Read-only: no transaction
+ * needed beyond the tenant-context session-var setter that
+ * withTenantContext already provides.
+ *
+ * @param {string} tenantId
+ * @param {object} query - validated listTripsQuerySchema output
+ * @param {{ withTenantContext: Function }} db
+ * @returns {Promise<{ trips: object[], pagination: object, aggregates: object }>}
+ */
+async function listTrips(tenantId, query, db) {
+  // Step 1: Normalize.
+  const searchOriginal = query.search?.trim() || null;
+  const customerId = query.customer_id ?? null;
+  const vehicleId = query.vehicle_id ?? null;
+  const driverId = query.driver_id ?? null;
+  const fromDate = query.from_date ?? null;
+  const toDate = query.to_date ?? null;
+  // Joi already validated each token (listTripsQuerySchema); normalize
+  // again defensively rather than trust the wire value verbatim.
+  const statusIn = query.status
+    ? query.status
+        .split(",")
+        .map((s) => s.trim().toUpperCase())
+        .filter(Boolean)
+    : null;
+  const serviceType = query.service_type ?? null;
+  const billingMode = query.billing_mode ?? null;
+  const sortBy = query.sort_by ?? "trip_date";
+  const sortDir = query.sort_dir ?? "desc";
+  const includeCancelled = query.includeCancelled ?? false;
+  const limit = query.limit ?? 25;
+  const offset = query.offset ?? 0;
+
+  // Steps 2-3: Derive/Validate. Nothing service-level — Joi handles shape.
+
+  // Steps 4-5: Read (no transaction needed — read-only).
+  const result = await db.withTenantContext(async (client) => {
+    return tripRepo.list(
+      tenantId,
+      {
+        limit,
+        offset,
+        customerId,
+        vehicleId,
+        driverId,
+        fromDate,
+        toDate,
+        statusIn,
+        serviceType,
+        billingMode,
+        searchOriginal,
+        sortBy,
+        sortDir,
+        includeCancelled,
+      },
+      client,
+    );
+  });
+
+  return {
+    trips: result.rows,
+    pagination: {
+      total: result.total_count,
+      limit,
+      offset,
+      has_more: offset + result.rows.length < result.total_count,
+    },
+    aggregates: {
+      sum_net_payable_paise: result.aggregates.sum_net_payable_paise,
+      sum_gross_paise: result.aggregates.sum_gross_paise,
+      count_by_status: result.aggregates.count_by_status,
+      sum_net_payable_rupees: formatINR(result.aggregates.sum_net_payable_paise),
+      sum_gross_rupees: formatINR(result.aggregates.sum_gross_paise),
+    },
+  };
+}
+
 module.exports = {
   createTripSheet,
   getTripSheet,
@@ -777,4 +856,5 @@ module.exports = {
   finalizeTripSheet,
   cancelTripSheet,
   markTripInvoiced,
+  listTrips,
 };
