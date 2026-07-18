@@ -20,3 +20,4 @@ Each ADR in this repository follows Michael Nygard's original format: **Status**
 | [ADR-003](ADR-003-rls-forced.md) | Enable AND force Row-Level Security on every business table | Accepted | 2026-07-18 |
 | [ADR-004](ADR-004-normalize-in-service.md) | Normalization is a service-layer responsibility | Accepted | 2026-07-18 |
 | [ADR-005](ADR-005-versioned-pricing.md) | Pricing rules are versioned; rate values are immutable after create | Accepted | 2026-07-18 |
+| [ADR-006](ADR-006-domain-error-translation.md) | Pure domain modules throw a dedicated DomainInputError class; services translate to apiError at their boundary | Accepted | 2026-07-18 |
