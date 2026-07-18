@@ -40,4 +40,16 @@ Task 3.1 shipped the `trip_sheets` base table, tenant-scoped FY-based trip sheet
 - List response is deliberately lean: omits `breakdown`, every `snap_*` field, and `tolls` to keep payload size down for ops browsing; `GET /trips/:id` remains the source for full detail.
 - `verify:trips-list` — 30/30, full Module 1-3 regression suite maintained.
 
+## Task 3.5: Performance sheet (Blue UI projection)
+
+- Read-only projection over `billing_mode='PERFORMANCE'` trips — no new table, no new migration; a view over `trip_sheets` joined to `customers` for the current display name.
+- `billing_mode='PERFORMANCE'` is a fixed filter the caller cannot override — it's the definition of a performance sheet, not an optional query param. Callers wanting GST trips use the general `GET /trips` list (Task 3.4).
+- Grouped by customer, each group carrying its own subtotal (`total_running_km`, `running_cost_paise`, `batta_paise`, `toll_paise`, `total_paise`); a grand total accumulates across the full filtered set independent of grouping.
+- Column names match the uploaded Blue UI reference PDF exactly, including the two differently-meaning `TOTAL_COST` columns from the source image (disambiguated here as `TOTAL_COST_*` for the base running cost and `GRAND_TOTAL_*` for the row's final total) — both paise and formatted rupees included per field so programmatic clients skip float parsing.
+- CSV export (`GET /trips/performance-sheet/export.csv`) is RFC 4180 compliant: CRLF line endings, double-quote wrapping/escaping on any field containing a comma, quote, or newline; a `SUBTOTAL` row after each customer group and one `GRAND TOTAL` row at the end.
+- Hard row cap of 10000 rows, enforced in the service (not Joi) — exceeding it is a `400 EXPORT_TOO_LARGE` rather than a silently truncated or oversized payload.
+- No new permission: both endpoints reuse `trips:read` (viewer included).
+- `GET /trips/performance-sheet` (JSON) and `GET /trips/performance-sheet/export.csv` (CSV, `Content-Disposition: attachment`), both mounted ahead of `GET /` and `GET /:tripId`.
+- `verify:trips-perf` — 23/23, full Module 1-3 regression suite maintained.
+
 No full docs pass in this task. Module 3 comprehensive docs come at Task 3.6 (parallel to Task 2.5 for Module 2).

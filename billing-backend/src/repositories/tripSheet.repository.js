@@ -585,6 +585,137 @@ async function list(
   };
 }
 
+// Sort whitelist for the performance sheet — deliberately a SUBSET of
+// list()'s SORT_WHITELIST (no created_at): the sheet is date-sequenced,
+// not a general ledger view. Mirrors performanceSheetQuerySchema's own
+// PERF_SORT_BY_VALUES whitelist (defense in depth, same pattern as
+// list()/SORT_WHITELIST above).
+const PERF_SORT_WHITELIST = {
+  trip_date: "trip_date",
+  total_km: "total_km",
+  net_payable_paise: "net_payable_paise",
+};
+
+/**
+ * Performance-sheet projection query: the Blue UI table over
+ * billing_mode='PERFORMANCE' trips, joined to customers for the
+ * CURRENT display name (this is a display sheet, not an invoice — an
+ * up-to-date name is more useful for ops than the trip's frozen
+ * snapshot name). Repo does NO grouping and NO CSV formatting — both
+ * are the service's job (performanceSheet.service.js); this function
+ * stays pure SQL composition, same convention as list() above.
+ *
+ * billing_mode = 'PERFORMANCE' is ALWAYS applied and cannot be
+ * overridden by any caller-supplied filter — it's the fixed definition
+ * of what a performance sheet is.
+ *
+ * @param {string} tenantId
+ * @param {{ customerId: ?string, vehicleId: ?string, driverId: ?string, fromDate: ?string, toDate: ?string, serviceType: ?string, statusIn: ?string[], includeCancelled: boolean, sortBy: string, sortDir: string, maxRows: number }} params
+ * @param {import('pg').PoolClient} client
+ * @returns {Promise<{ rows: object[], truncated: boolean }>}
+ */
+async function listPerformanceRows(
+  tenantId,
+  { customerId, vehicleId, driverId, fromDate, toDate, serviceType, statusIn, includeCancelled, sortBy, sortDir, maxRows },
+  client,
+) {
+  const wheres = ["t.tenant_id = $1::uuid", "t.billing_mode = 'PERFORMANCE'::trip_billing_mode_enum"];
+  const params = [tenantId];
+  let i = 2;
+
+  if (customerId) {
+    wheres.push(`t.customer_id = $${i}::uuid`);
+    params.push(customerId);
+    i++;
+  }
+  if (vehicleId) {
+    wheres.push(`t.vehicle_id = $${i}::uuid`);
+    params.push(vehicleId);
+    i++;
+  }
+  if (driverId) {
+    wheres.push(`t.driver_id = $${i}::uuid`);
+    params.push(driverId);
+    i++;
+  }
+  if (fromDate) {
+    wheres.push(`t.trip_date >= $${i}::date`);
+    params.push(fromDate);
+    i++;
+  }
+  if (toDate) {
+    wheres.push(`t.trip_date <= $${i}::date`);
+    params.push(toDate);
+    i++;
+  }
+
+  if (statusIn && statusIn.length > 0) {
+    wheres.push(`t.status = ANY($${i}::trip_status_enum[])`);
+    params.push(statusIn);
+    i++;
+  } else if (!includeCancelled) {
+    wheres.push(`t.status <> 'CANCELLED'::trip_status_enum`);
+  }
+
+  if (serviceType) {
+    wheres.push(`t.service_type = $${i}::trip_service_type_enum`);
+    params.push(serviceType);
+    i++;
+  }
+
+  const whereClause = wheres.join(" AND ");
+
+  const orderCol = PERF_SORT_WHITELIST[sortBy];
+  if (!orderCol) {
+    throw new Error(`Unsupported sortBy column: ${sortBy}`);
+  }
+  if (sortDir !== "asc" && sortDir !== "desc") {
+    throw new Error(`Unsupported sortDir: ${sortDir}`);
+  }
+  const orderDir = sortDir.toUpperCase() === "ASC" ? "ASC" : "DESC";
+  // Secondary sort by customer_display_name keeps group boundaries
+  // stable when the primary sort ties (same trip_date across two
+  // customers always sorts predictably); tertiary by id breaks any
+  // remaining tie deterministically.
+  const orderBy = `ORDER BY t.${orderCol} ${orderDir}, customer_display_name ASC, t.id ASC`;
+
+  // Fetch maxRows + 1 so we can detect truncation without a second
+  // COUNT(*) round-trip: if we get back maxRows+1 rows, there were more
+  // than maxRows matches and the extra row is dropped before returning.
+  params.push(maxRows + 1);
+  const result = await client.query(
+    `SELECT
+       t.id                       AS trip_id,
+       t.trip_date                AS trip_date,
+       t.snapshot_vehicle_type    AS vehicle_type,
+       t.snapshot_vehicle_number  AS vehicle_number,
+       t.total_km                 AS total_running_km,
+       COALESCE(t.snap_per_km_rate_paise, 0) AS per_km_rate_paise,
+       t.base_amount_paise        AS running_cost_paise,
+       t.driver_batta_paise       AS batta_paise,
+       t.toll_paise               AS toll_paise,
+       t.net_payable_paise        AS total_paise,
+       t.status                   AS status,
+       t.customer_id              AS customer_id,
+       COALESCE(c.company_name, c.name, '') AS customer_display_name,
+       c.customer_type            AS customer_type
+     FROM trip_sheets t
+     LEFT JOIN customers c
+       ON c.id = t.customer_id
+       AND c.tenant_id = t.tenant_id
+     WHERE ${whereClause}
+     ${orderBy}
+     LIMIT $${i}`,
+    params,
+  );
+
+  const truncated = result.rows.length > maxRows;
+  return {
+    rows: truncated ? result.rows.slice(0, maxRows) : result.rows,
+    truncated,
+  };
+}
+
 module.exports = {
   insert,
   findById,
@@ -593,4 +724,5 @@ module.exports = {
   transitionStatus,
   updateDraft,
   list,
+  listPerformanceRows,
 };

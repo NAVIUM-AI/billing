@@ -268,6 +268,84 @@ const listTripsQuerySchema = Joi.object({
     "status.invalid": `status values must be one of ${STATUS_VALUES.join(", ")}`,
   });
 
+const PERF_SORT_BY_VALUES = ["trip_date", "total_km", "net_payable_paise"];
+
+// Performance sheet is billing_mode='PERFORMANCE' trips only. This
+// filter is implicit and cannot be overridden — it's the definition of
+// a performance sheet. Callers who want GST trips use the general
+// /trips list (Task 3.4). That's why there's no billing_mode field on
+// this schema at all: unlike listTripsQuerySchema, there's nothing to
+// choose here.
+const performanceSheetQuerySchema = Joi.object({
+  customer_id: Joi.string().guid({ version: "uuidv4" }),
+  vehicle_id: Joi.string().guid({ version: "uuidv4" }),
+  driver_id: Joi.string().guid({ version: "uuidv4" }),
+
+  from_date: Joi.string().custom((val, helpers) => {
+    if (!isValidCalendarDate(val)) return helpers.error("date.invalidCalendarDate");
+    return val;
+  }),
+  to_date: Joi.string().custom((val, helpers) => {
+    if (!isValidCalendarDate(val)) return helpers.error("date.invalidCalendarDate");
+    return val;
+  }),
+
+  service_type: Joi.string().valid(...SERVICE_TYPES),
+
+  // No Joi-level .default() here, deliberately — the effective default
+  // ("DRAFT,FINALIZED,INVOICED", i.e. everything but CANCELLED) is
+  // achieved the same way Task 3.4's listTripsQuerySchema achieves it:
+  // via includeCancelled below, not by hardcoding a status list that
+  // would then permanently win over includeCancelled=true (an explicit
+  // statusIn always overrides includeCancelled at the repo layer — see
+  // listPerformanceRows). Baking a default status string in here would
+  // make includeCancelled=true silently do nothing.
+  status: Joi.string().custom((val, helpers) => {
+    const tokens = val
+      .split(",")
+      .map((s) => s.trim().toUpperCase())
+      .filter(Boolean);
+    if (tokens.length === 0) {
+      return helpers.error("status.empty");
+    }
+    for (const token of tokens) {
+      if (!STATUS_VALUES.includes(token)) {
+        return helpers.error("status.invalid", { token });
+      }
+    }
+    return tokens.join(",");
+  }),
+
+  includeCancelled: Joi.boolean().default(false),
+
+  // Subset of Task 3.4's list sort keys — customer and created_at are
+  // excluded (a performance sheet is date-sequenced, not a general
+  // ledger view). Chronological ascending is the default: a cost sheet
+  // reads more naturally oldest-to-newest than a general list does.
+  sort_by: Joi.string()
+    .valid(...PERF_SORT_BY_VALUES)
+    .default("trip_date"),
+  sort_dir: Joi.string().valid("asc", "desc").default("asc"),
+})
+  .custom((value, helpers) => {
+    if (value.from_date && value.to_date && value.from_date > value.to_date) {
+      return helpers.error("date.rangeInverted");
+    }
+    return value;
+  })
+  .messages({
+    "date.invalidCalendarDate": "must be a valid date in YYYY-MM-DD format",
+    "date.rangeInverted": "from_date must be on or before to_date",
+    "status.empty": "status must contain at least one value",
+    "status.invalid": `status values must be one of ${STATUS_VALUES.join(", ")}`,
+  });
+
+// Same shape as the JSON query — the CSV endpoint's hard row cap
+// (10000) is enforced in the service (performanceSheet.service.js),
+// not here, since it's a runtime data-volume guard, not a shape
+// concern of the request itself.
+const performanceSheetCsvQuerySchema = performanceSheetQuerySchema;
+
 module.exports = {
   SERVICE_TYPES,
   BILLING_MODES,
@@ -276,4 +354,6 @@ module.exports = {
   cancelTripSchema,
   tripIdParamSchema,
   listTripsQuerySchema,
+  performanceSheetQuerySchema,
+  performanceSheetCsvQuerySchema,
 };
