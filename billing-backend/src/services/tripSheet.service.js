@@ -24,6 +24,7 @@ const { rupeesToPaise } = require("../utils/money");
 const { toIndianFY } = require("../utils/fiscalYear");
 const tsn = require("../utils/tripSheetNumber");
 const tripRepo = require("../repositories/tripSheet.repository");
+const tollRepo = require("../repositories/tripToll.repository");
 const seqRepo = require("../repositories/tripSheetSequence.repository");
 const custRepo = require("../repositories/customer.repository");
 const vehRepo = require("../repositories/vehicle.repository");
@@ -57,6 +58,27 @@ function deriveRuleType(serviceType, billingMode) {
 }
 
 /**
+ * Normalizes the wire-shape `tolls` array (Task 3.2) into the
+ * repository's camelCase param shape, assigning line_number
+ * sequentially in request order.
+ *
+ * @param {Array<object>} tollsInput - validated tollReceiptSchema items
+ * @returns {Array<object>}
+ */
+function normalizeTolls(tollsInput) {
+  return tollsInput.map((t, i) => ({
+    plazaName: t.plaza_name.trim(),
+    tollId: t.toll_id?.trim() || null,
+    amountPaise: rupeesToPaise(t.amount_rupees),
+    crossedAt: t.crossed_at || null,
+    vehicleNumber: t.vehicle_number?.trim() || null,
+    closingBalancePaise: t.closing_balance_rupees != null ? rupeesToPaise(t.closing_balance_rupees) : null,
+    notes: t.notes?.trim() || null,
+    lineNumber: i + 1,
+  }));
+}
+
+/**
  * Parses a 'YYYY-MM-DD' string into a Date at LOCAL midnight (via the
  * y/m/d numeric constructor, not `new Date(str)`), matching
  * fiscalYear.js#toIndianFY's use of the local-time getFullYear()/
@@ -87,12 +109,13 @@ async function createTripSheet(tenantId, input, actorUserId, db) {
   // Step 1: Normalize.
   const serviceType = input.service_type.toUpperCase();
   const billingMode = input.billing_mode.toUpperCase();
-  const tollPaise = rupeesToPaise(input.toll_rupees);
+  const explicitTollPaise = rupeesToPaise(input.toll_rupees);
   const parkingPaise = rupeesToPaise(input.parking_rupees);
   const permitPaise = rupeesToPaise(input.permit_rupees);
   const fasttagPaise = rupeesToPaise(input.fasttag_rupees);
   const advancePaise = rupeesToPaise(input.advance_rupees);
   const tripDateObj = parseCalendarDateLocal(input.trip_date);
+  const normalizedTolls = normalizeTolls(input.tolls);
 
   // Step 2: Derive.
   const fiscalYear = toIndianFY(tripDateObj);
@@ -106,14 +129,27 @@ async function createTripSheet(tenantId, input, actorUserId, db) {
     throw apiError(400, "INVALID_KM_RANGE", "closing_km must be >= opening_km");
   }
 
-  if (serviceType !== "LOCAL") {
+  // Sum-vs-array cross-field rule (Task 3.2): the wire contract must
+  // not accept both a lump-sum toll_rupees AND an itemized tolls array
+  // on the same request — see tripSheet.validator.js's top-of-file
+  // comment on tollReceiptSchema for why this lives here, not in Joi.
+  if (serviceType === "OUTSTATION" && normalizedTolls.length > 0 && explicitTollPaise > 0) {
     throw apiError(
-      501,
-      "NOT_YET_IMPLEMENTED",
-      "Outstation trip creation ships in Task 3.2.",
-      { service_type: serviceType },
+      400,
+      "TOLL_INPUT_CONFLICT",
+      "Provide either a lump-sum toll_rupees OR an itemized tolls array — not both.",
+      { toll_rupees: input.toll_rupees, tolls_count: normalizedTolls.length },
     );
   }
+
+  // Effective toll: sum of itemized receipts when present, otherwise
+  // the lump-sum value. The conflict check above guarantees these two
+  // sources are never both nonzero, so there's no ambiguity in which
+  // one "wins".
+  const tollPaise =
+    normalizedTolls.length > 0
+      ? normalizedTolls.reduce((sum, t) => sum + t.amountPaise, 0)
+      : explicitTollPaise;
 
   // Steps 4 + 5: Check (DB state) + Write, as one transaction.
   return db.withTenantContext(async (client) => {
@@ -158,10 +194,26 @@ async function createTripSheet(tenantId, input, actorUserId, db) {
 
     // (e) Compute pricing via the pure calculator.
     const ruleForCalc = { rule_type: rule.rule_type, ...rule };
-    const usage =
-      billingMode === "PERFORMANCE"
-        ? { running_km: input.total_km, toll_paise: tollPaise }
-        : { total_km: input.total_km, total_hours: input.total_hours, toll_paise: tollPaise };
+    let usage;
+    if (billingMode === "PERFORMANCE") {
+      // Same shape for LOCAL and OUTSTATION performance — sum km with
+      // batta and toll. Service_type doesn't affect this branch at all.
+      usage = { running_km: input.total_km, toll_paise: tollPaise };
+    } else if (serviceType === "OUTSTATION") {
+      // OUTSTATION GST (slab-based).
+      usage = {
+        total_km: input.total_km,
+        total_days: input.total_days,
+        toll_paise: tollPaise,
+        parking_paise: parkingPaise,
+        permit_paise: permitPaise,
+        fasttag_paise: fasttagPaise,
+        advance_paise: advancePaise,
+      };
+    } else {
+      // LOCAL GST — unchanged from Task 3.1.
+      usage = { total_km: input.total_km, total_hours: input.total_hours, toll_paise: tollPaise };
+    }
 
     let calcResult;
     try {
@@ -182,23 +234,42 @@ async function createTripSheet(tenantId, input, actorUserId, db) {
     let extrasAmountPaise;
     let driverBattaPaise;
     let subtotalPaise;
+    let grossPaise;
+    let netPayablePaise;
     if (ruleType === "LOCAL_PACKAGE") {
       baseAmountPaise = calcResult.base_paise;
       extrasAmountPaise = calcResult.extra_km_paise + calcResult.extra_hours_paise;
       driverBattaPaise = 0;
       subtotalPaise = calcResult.subtotal_paise;
+      // Advance is intentionally NOT applied to LOCAL trips at trip
+      // level — see the outstation advance-at-invoice note below.
+      // gross === net for LOCAL_PACKAGE.
+      grossPaise = subtotalPaise;
+      netPayablePaise = grossPaise;
+    } else if (ruleType === "OUTSTATION_SLAB") {
+      baseAmountPaise = calcResult.slab_paise;
+      // toll_paise is tracked in its own trip_sheets column (like
+      // LOCAL_PACKAGE), so it's deliberately excluded here — extras is
+      // parking + permit + fasttag only.
+      extrasAmountPaise = calcResult.parking_paise + calcResult.permit_paise + calcResult.fasttag_paise;
+      driverBattaPaise = calcResult.batta_paise;
+      subtotalPaise = calcResult.gross_paise;
+      grossPaise = calcResult.gross_paise;
+      // Unlike LOCAL, advance IS deducted here: net_payable = gross -
+      // advance for OUTSTATION (the Niriksha CI-1905 reference).
+      // Invoice-level advance handling for combined B2B billing is
+      // Module 4's concern, not this trip-level figure.
+      netPayablePaise = calcResult.net_payable_paise;
     } else {
-      // PERFORMANCE
+      // PERFORMANCE — identical calculator output shape regardless of
+      // service_type (LOCAL or OUTSTATION), so one branch covers both.
       baseAmountPaise = calcResult.km_paise;
       extrasAmountPaise = 0;
       driverBattaPaise = calcResult.batta_paise;
       subtotalPaise = calcResult.total_paise;
+      grossPaise = subtotalPaise;
+      netPayablePaise = grossPaise;
     }
-    // Advance is intentionally NOT applied to LOCAL trips at trip
-    // level — see the outstation advance-at-invoice note in the Task
-    // 3.1 spec. gross === net for both LOCAL_PACKAGE and PERFORMANCE.
-    const grossPaise = subtotalPaise;
-    const netPayablePaise = grossPaise;
 
     // (g) Allocate the trip sheet number.
     const tenant = await tenantRepo.findById(tenantId, client);
@@ -223,8 +294,9 @@ async function createTripSheet(tenantId, input, actorUserId, db) {
       performanceBattaPaise: rule.performance_batta_paise,
     };
 
-    // (i) Insert.
-    return tripRepo.insert(
+    // (i) Insert the trip, then its itemized tolls (if any) in the same
+    // transaction — either both land or neither does.
+    const trip = await tripRepo.insert(
       tenantId,
       {
         tripSheetNumber,
@@ -266,6 +338,10 @@ async function createTripSheet(tenantId, input, actorUserId, db) {
       },
       client,
     );
+
+    const tolls = await tollRepo.insertBatch(tenantId, trip.id, normalizedTolls, client);
+
+    return { ...trip, tolls };
   });
 }
 
@@ -276,7 +352,14 @@ async function createTripSheet(tenantId, input, actorUserId, db) {
  * @returns {Promise<object>}
  */
 async function getTripSheet(tenantId, id, db) {
-  const trip = await db.withTenantContext((client) => tripRepo.findById(tenantId, id, client));
+  const trip = await db.withTenantContext(async (client) => {
+    const found = await tripRepo.findById(tenantId, id, client);
+    if (!found) {
+      return null;
+    }
+    const tolls = await tollRepo.listByTrip(tenantId, id, client);
+    return { ...found, tolls };
+  });
   if (!trip) {
     throw apiError(404, "TRIP_NOT_FOUND", "Trip sheet not found.");
   }

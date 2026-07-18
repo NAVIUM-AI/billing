@@ -4,10 +4,15 @@
 # and LOCAL/PERFORMANCE trip creation via the Module 2 pricing engine,
 # FY-based trip-sheet numbering (concurrency-safe sequence allocation),
 # rule/vehicle/customer snapshotting (immutable even after the source
-# rule is superseded), the OUTSTATION 501 stub, RBAC, and cross-tenant +
-# DB-layer isolation. Mirrors scripts/verify-pricing.sh /
-# verify-customers.sh (Tasks 2.1-2.6). Prints a PASS/FAIL summary and
-# exits 1 if anything failed.
+# rule is superseded), RBAC, and cross-tenant + DB-layer isolation.
+# Step 4 originally asserted the OUTSTATION path returned its Task-3.1
+# 501 stub; Task 3.2 replaced that stub with a real implementation, so
+# Step 4 now just asserts OUTSTATION is reachable and produces a real
+# pricing decision — full outstation coverage (Cauvery/Niriksha
+# reference reproductions, itemized tolls, etc.) lives in
+# scripts/verify-trip-sheet-outstation.sh. Mirrors
+# scripts/verify-pricing.sh / verify-customers.sh (Tasks 2.1-2.6).
+# Prints a PASS/FAIL summary and exits 1 if anything failed.
 #
 # Deliberately `set -u` but NOT `set -e`: we want every check to run
 # even if an earlier one fails, so the summary reports everything
@@ -261,17 +266,26 @@ else
   fail "Create LOCAL/PERFORMANCE trip (Blue UI ref)" "$(IFS='; '; echo "${STEP3_REASONS[*]}")"
 fi
 
-# ─── Step 4: OUTSTATION trip -> 501 NOT_YET_IMPLEMENTED ───
+# ─── Step 4: OUTSTATION trip creation is live (Task 3.2) ───
+# Was "OUTSTATION -> 501 NOT_YET_IMPLEMENTED" through Task 3.1. Task 3.2
+# replaced that stub with a real implementation (see
+# scripts/verify-trip-sheet-outstation.sh for full outstation
+# coverage), so this script's job shrinks to a regression check: the
+# OUTSTATION code path is reachable and produces a real business
+# decision, not the old stub. VEH_SEDAN has a LOCAL_PACKAGE rule (this
+# script's setup) but no OUTSTATION_SLAB rule, so the correct outcome is
+# NO_APPLICABLE_PRICING_RULE — proving the request reached real pricing
+# logic instead of short-circuiting on service_type.
 CREATE4_STATUS=$(curl -s -o "$WORK_DIR/trip4.json" -w '%{http_code}' -X POST "$BASE_URL/trips" \
   -H "Authorization: Bearer $STAFF_A_TOKEN" -H "Content-Type: application/json" \
   -d "{\"service_type\":\"OUTSTATION\",\"billing_mode\":\"GST\",\"customer_id\":\"$CUST_B2B\",\"vehicle_id\":\"$VEH_SEDAN\",\"trip_date\":\"2026-06-20\",\"total_km\":1000,\"total_hours\":24,\"total_days\":3}")
 CREATE4_CODE=$(jq -r '.error.code // empty' "$WORK_DIR/trip4.json")
-CREATE4_SVC=$(jq -r '.error.details.service_type // empty' "$WORK_DIR/trip4.json")
+CREATE4_RTYPE=$(jq -r '.error.details.rule_type // empty' "$WORK_DIR/trip4.json")
 
-if [ "$CREATE4_STATUS" = "501" ] && [ "$CREATE4_CODE" = "NOT_YET_IMPLEMENTED" ] && [ "$CREATE4_SVC" = "OUTSTATION" ]; then
-  pass "OUTSTATION trip creation: 501 NOT_YET_IMPLEMENTED, details.service_type = OUTSTATION"
+if [ "$CREATE4_STATUS" = "400" ] && [ "$CREATE4_CODE" = "NO_APPLICABLE_PRICING_RULE" ] && [ "$CREATE4_RTYPE" = "OUTSTATION_SLAB" ]; then
+  pass "OUTSTATION trip creation is live (Task 3.2): 400 NO_APPLICABLE_PRICING_RULE (no stub, no OUTSTATION_SLAB rule configured for SEDAN)"
 else
-  fail "OUTSTATION trip creation: 501 NOT_YET_IMPLEMENTED" "status '$CREATE4_STATUS', code '$CREATE4_CODE', service_type '$CREATE4_SVC'"
+  fail "OUTSTATION trip creation is live: 400 NO_APPLICABLE_PRICING_RULE" "status '$CREATE4_STATUS', code '$CREATE4_CODE', rule_type '$CREATE4_RTYPE'"
 fi
 
 # ─── Step 5: missing pricing rule -> clean 400 ───
