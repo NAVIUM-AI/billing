@@ -5,15 +5,16 @@
  * FY-based numbering, lifecycle transitions) in tripSheet.service.js.
  *
  * Task 3.1 shipped create + get. Task 3.3 added PATCH (DRAFT-only edits)
- * and the finalize/cancel transitions. Task 3.4 adds GET / (filtered
- * list + aggregates) — mounted BEFORE GET /:tripId so the specific path
- * reads clearly ahead of the param route in this file, even though
- * Express would already disambiguate the two (no ambiguity: "/" vs
- * "/:tripId" never collide). There is deliberately NO route for the
- * INVOICED transition — markTripInvoiced exists only as a service
- * function for Module 4 to call from its own transaction; hitting a
- * fabricated /invoice route 404s automatically since no such route is
- * registered.
+ * and the finalize/cancel transitions. Task 3.4 added GET / (filtered
+ * list + aggregates). Task 3.5 adds the performance-sheet projection
+ * (JSON + CSV export) — both mounted BEFORE GET / and GET /:tripId so
+ * the static paths read clearly ahead of the param route in this file,
+ * even though Express would already disambiguate them (no ambiguity:
+ * "/performance-sheet" vs "/:tripId" never collide). There is
+ * deliberately NO route for the INVOICED transition — markTripInvoiced
+ * exists only as a service function for Module 4 to call from its own
+ * transaction; hitting a fabricated /invoice route 404s automatically
+ * since no such route is registered.
  */
 
 const express = require("express");
@@ -28,12 +29,45 @@ const {
   cancelTripSchema,
   tripIdParamSchema,
   listTripsQuerySchema,
+  performanceSheetQuerySchema,
+  performanceSheetCsvQuerySchema,
 } = require("../../validators/tripSheet.validator");
 const tripSheetService = require("../../services/tripSheet.service");
+const perfSheet = require("../../services/performanceSheet.service");
 
 const router = express.Router();
 
 router.use(authenticate, tenantContext);
+
+router.get(
+  "/performance-sheet",
+  requirePermission("trips:read"),
+  validate(performanceSheetQuerySchema, "query"),
+  async (req, res) => {
+    const sheet = await perfSheet.getPerformanceSheet(req.tenantId, req.query, req.db);
+    res.json(sheet);
+  },
+);
+
+router.get(
+  "/performance-sheet/export.csv",
+  requirePermission("trips:read"),
+  validate(performanceSheetCsvQuerySchema, "query"),
+  async (req, res) => {
+    const { filename, csv, row_count, group_count } = await perfSheet.getPerformanceSheetCsv(
+      req.tenantId,
+      req.query,
+      req.db,
+    );
+    res.set({
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": `attachment; filename="${filename}"`,
+      "X-Row-Count": String(row_count),
+      "X-Group-Count": String(group_count),
+    });
+    res.send(csv);
+  },
+);
 
 router.post(
   "/",
