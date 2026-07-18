@@ -194,6 +194,80 @@ const tripIdParamSchema = Joi.object({
   tripId: Joi.string().guid({ version: "uuidv4" }).required(),
 });
 
+const STATUS_VALUES = ["DRAFT", "FINALIZED", "INVOICED", "CANCELLED"];
+const SORT_BY_VALUES = ["trip_date", "created_at", "total_km", "net_payable_paise"];
+
+// Rule 6: fail early at Joi with clear codes so the service and repo see
+// only known-good, sanitized inputs. The sort whitelist is a security
+// boundary, not a UX nicety — sortBy is used to build an ORDER BY clause
+// via string interpolation in the repo (Postgres has no way to
+// parameterize a column/identifier name), so anything that reaches the
+// repo MUST already be constrained to a fixed, hardcoded set of column
+// names. Both this schema's `.valid(...)` AND the repo's own hardcoded
+// SORT_WHITELIST enforce that constraint independently (defense in
+// depth) — see tripSheet.repository.js#list.
+const listTripsQuerySchema = Joi.object({
+  limit: Joi.number().integer().min(1).max(100).default(25),
+  offset: Joi.number().integer().min(0).default(0),
+
+  customer_id: Joi.string().guid({ version: "uuidv4" }),
+  vehicle_id: Joi.string().guid({ version: "uuidv4" }),
+  driver_id: Joi.string().guid({ version: "uuidv4" }),
+
+  from_date: Joi.string().custom((val, helpers) => {
+    if (!isValidCalendarDate(val)) return helpers.error("date.invalidCalendarDate");
+    return val;
+  }),
+  to_date: Joi.string().custom((val, helpers) => {
+    if (!isValidCalendarDate(val)) return helpers.error("date.invalidCalendarDate");
+    return val;
+  }),
+
+  // Comma-separated list of trip_status_enum values, e.g. "DRAFT,FINALIZED".
+  // Parsed and validated here (not left as an opaque string) so an
+  // unknown status token is rejected with a clear 400 instead of
+  // silently matching zero rows at the repo layer.
+  status: Joi.string().custom((val, helpers) => {
+    const tokens = val
+      .split(",")
+      .map((s) => s.trim().toUpperCase())
+      .filter(Boolean);
+    if (tokens.length === 0) {
+      return helpers.error("status.empty");
+    }
+    for (const token of tokens) {
+      if (!STATUS_VALUES.includes(token)) {
+        return helpers.error("status.invalid", { token });
+      }
+    }
+    return tokens.join(",");
+  }),
+
+  service_type: Joi.string().valid(...SERVICE_TYPES),
+  billing_mode: Joi.string().valid(...BILLING_MODES),
+
+  search: Joi.string().trim().min(1).max(50),
+
+  sort_by: Joi.string()
+    .valid(...SORT_BY_VALUES)
+    .default("trip_date"),
+  sort_dir: Joi.string().valid("asc", "desc").default("desc"),
+
+  includeCancelled: Joi.boolean().default(false),
+})
+  .custom((value, helpers) => {
+    if (value.from_date && value.to_date && value.from_date > value.to_date) {
+      return helpers.error("date.rangeInverted");
+    }
+    return value;
+  })
+  .messages({
+    "date.invalidCalendarDate": "must be a valid date in YYYY-MM-DD format",
+    "date.rangeInverted": "from_date must be on or before to_date",
+    "status.empty": "status must contain at least one value",
+    "status.invalid": `status values must be one of ${STATUS_VALUES.join(", ")}`,
+  });
+
 module.exports = {
   SERVICE_TYPES,
   BILLING_MODES,
@@ -201,4 +275,5 @@ module.exports = {
   updateTripSheetSchema,
   cancelTripSchema,
   tripIdParamSchema,
+  listTripsQuerySchema,
 };

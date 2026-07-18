@@ -4,12 +4,16 @@
  * (normalize/derive/validate/check/write, pricing dispatch, snapshotting,
  * FY-based numbering, lifecycle transitions) in tripSheet.service.js.
  *
- * Task 3.1 shipped create + get. Task 3.3 adds PATCH (DRAFT-only edits)
- * and the finalize/cancel transitions. List (Task 3.4) is still out of
- * scope here. There is deliberately NO route for the INVOICED
- * transition — markTripInvoiced exists only as a service function for
- * Module 4 to call from its own transaction; hitting a fabricated
- * /invoice route 404s automatically since no such route is registered.
+ * Task 3.1 shipped create + get. Task 3.3 added PATCH (DRAFT-only edits)
+ * and the finalize/cancel transitions. Task 3.4 adds GET / (filtered
+ * list + aggregates) — mounted BEFORE GET /:tripId so the specific path
+ * reads clearly ahead of the param route in this file, even though
+ * Express would already disambiguate the two (no ambiguity: "/" vs
+ * "/:tripId" never collide). There is deliberately NO route for the
+ * INVOICED transition — markTripInvoiced exists only as a service
+ * function for Module 4 to call from its own transaction; hitting a
+ * fabricated /invoice route 404s automatically since no such route is
+ * registered.
  */
 
 const express = require("express");
@@ -23,6 +27,7 @@ const {
   updateTripSheetSchema,
   cancelTripSchema,
   tripIdParamSchema,
+  listTripsQuerySchema,
 } = require("../../validators/tripSheet.validator");
 const tripSheetService = require("../../services/tripSheet.service");
 
@@ -42,6 +47,16 @@ router.post(
       req.db,
     );
     res.status(201).json({ trip });
+  },
+);
+
+router.get(
+  "/",
+  requirePermission("trips:read"),
+  validate(listTripsQuerySchema, "query"),
+  async (req, res) => {
+    const result = await tripSheetService.listTrips(req.tenantId, req.query, req.db);
+    res.json(result);
   },
 );
 

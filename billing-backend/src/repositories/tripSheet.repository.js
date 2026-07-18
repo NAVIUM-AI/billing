@@ -397,6 +397,194 @@ async function updateDraft(tenantId, id, patch, client) {
   }
 }
 
+// Sort column whitelist — hardcoded here as defense in depth on top of
+// the validator's own `.valid(...)` whitelist (tripSheet.validator.js's
+// listTripsQuerySchema). No user input is ever interpolated into SQL;
+// only these pre-validated literal strings are.
+const SORT_WHITELIST = {
+  trip_date: "trip_date",
+  created_at: "created_at",
+  total_km: "total_km",
+  net_payable_paise: "net_payable_paise",
+};
+
+/**
+ * Composes WHERE dynamically from pre-validated service inputs. All enum
+ * params get explicit casts (Rule 1). Sort column is whitelisted at both
+ * the validator (Rule 6, fail early) AND here in the repo (defense in
+ * depth) — never interpolate user strings into ORDER BY.
+ *
+ * @param {string} tenantId
+ * @param {{ limit: number, offset: number, customerId: ?string, vehicleId: ?string, driverId: ?string, fromDate: ?string, toDate: ?string, statusIn: ?string[], serviceType: ?string, billingMode: ?string, searchOriginal: ?string, sortBy: string, sortDir: string, includeCancelled: boolean }} params
+ * @param {import('pg').PoolClient} client
+ * @returns {Promise<{ rows: object[], total_count: number, aggregates: object }>}
+ */
+async function list(
+  tenantId,
+  {
+    limit,
+    offset,
+    customerId,
+    vehicleId,
+    driverId,
+    fromDate,
+    toDate,
+    statusIn,
+    serviceType,
+    billingMode,
+    searchOriginal,
+    sortBy,
+    sortDir,
+    includeCancelled,
+  },
+  client,
+) {
+  const wheres = ["tenant_id = $1::uuid"];
+  const params = [tenantId];
+  let i = 2;
+
+  if (customerId) {
+    wheres.push(`customer_id = $${i}::uuid`);
+    params.push(customerId);
+    i++;
+  }
+  if (vehicleId) {
+    wheres.push(`vehicle_id = $${i}::uuid`);
+    params.push(vehicleId);
+    i++;
+  }
+  if (driverId) {
+    wheres.push(`driver_id = $${i}::uuid`);
+    params.push(driverId);
+    i++;
+  }
+  if (fromDate) {
+    wheres.push(`trip_date >= $${i}::date`);
+    params.push(fromDate);
+    i++;
+  }
+  if (toDate) {
+    wheres.push(`trip_date <= $${i}::date`);
+    params.push(toDate);
+    i++;
+  }
+
+  // Status handling — explicit multi-value filter overrides the
+  // includeCancelled default; otherwise fall back to excluding CANCELLED
+  // unless the caller asked to includeCancelled.
+  if (statusIn && statusIn.length > 0) {
+    wheres.push(`status = ANY($${i}::trip_status_enum[])`);
+    params.push(statusIn);
+    i++;
+  } else if (!includeCancelled) {
+    wheres.push(`status <> 'CANCELLED'::trip_status_enum`);
+  }
+
+  if (serviceType) {
+    wheres.push(`service_type = $${i}::trip_service_type_enum`);
+    params.push(serviceType);
+    i++;
+  }
+  if (billingMode) {
+    wheres.push(`billing_mode = $${i}::trip_billing_mode_enum`);
+    params.push(billingMode);
+    i++;
+  }
+
+  // Search: substring match on trip_sheet_number and the snapshot
+  // customer name column. snapshot_customer_gstin is intentionally NOT
+  // searched here — GSTIN search belongs in the customers list, not
+  // trips list. Only one $ placeholder needed since the same parameter
+  // is reused twice in the OR.
+  if (searchOriginal) {
+    wheres.push(
+      `(trip_sheet_number ILIKE '%' || $${i} || '%' OR snapshot_customer_name ILIKE '%' || $${i} || '%')`,
+    );
+    params.push(searchOriginal);
+    i++;
+  }
+
+  const whereClause = wheres.join(" AND ");
+
+  const orderCol = SORT_WHITELIST[sortBy];
+  if (!orderCol) {
+    // Reaching here means the validator's whitelist was bypassed
+    // somehow — a bug, not user input, so a plain Error (not apiError)
+    // is correct: this should 500, loudly, not be treated as a 4xx.
+    throw new Error(`Unsupported sortBy column: ${sortBy}`);
+  }
+  if (sortDir !== "asc" && sortDir !== "desc") {
+    throw new Error(`Unsupported sortDir: ${sortDir}`);
+  }
+  const orderDir = sortDir.toUpperCase() === "ASC" ? "ASC" : "DESC";
+  // Secondary sort by id ensures stable ordering when the primary sort
+  // has ties (multiple trips on the same date, for example).
+  const orderBy = `ORDER BY ${orderCol} ${orderDir}, id ASC`;
+
+  // (A) Data query — same WHERE, with sort + paging. Deliberately omits
+  // breakdown (large JSONB), snap_* fields, and tolls — those are
+  // single-trip GET only, keeping the list payload small.
+  const dataParams = [...params, limit, offset];
+  const dataResult = await client.query(
+    `SELECT
+       id, tenant_id, trip_sheet_number,
+       service_type, billing_mode, status,
+       customer_id, vehicle_id, driver_id,
+       snapshot_vehicle_number,
+       snapshot_vehicle_type,
+       snapshot_customer_name,
+       snapshot_customer_gstin,
+       trip_date, total_km, total_hours,
+       total_days,
+       subtotal_paise, gross_paise,
+       net_payable_paise,
+       advance_paise,
+       finalized_at, cancelled_at,
+       invoice_id,
+       created_at, updated_at
+     FROM trip_sheets
+     WHERE ${whereClause}
+     ${orderBy}
+     LIMIT $${i} OFFSET $${i + 1}`,
+    dataParams,
+  );
+
+  // (B) Aggregates query — same WHERE array (trimmed to the pre-LIMIT
+  // params), no sort/paging. Reusing `wheres`/`params` rather than a
+  // second hand-written WHERE clause is deliberate: copy-pasting the
+  // clause into two strings creates drift the moment a new filter is
+  // added to one but not the other.
+  const aggResult = await client.query(
+    `SELECT
+       COUNT(*)::bigint AS total_count,
+       COALESCE(SUM(net_payable_paise), 0)::bigint AS sum_net_payable_paise,
+       COALESCE(SUM(gross_paise), 0)::bigint AS sum_gross_paise,
+       COALESCE(COUNT(*) FILTER (WHERE status = 'DRAFT'::trip_status_enum), 0)::bigint AS count_draft,
+       COALESCE(COUNT(*) FILTER (WHERE status = 'FINALIZED'::trip_status_enum), 0)::bigint AS count_finalized,
+       COALESCE(COUNT(*) FILTER (WHERE status = 'INVOICED'::trip_status_enum), 0)::bigint AS count_invoiced,
+       COALESCE(COUNT(*) FILTER (WHERE status = 'CANCELLED'::trip_status_enum), 0)::bigint AS count_cancelled
+     FROM trip_sheets
+     WHERE ${whereClause}`,
+    params,
+  );
+  const agg = aggResult.rows[0];
+
+  return {
+    rows: dataResult.rows,
+    total_count: Number(agg.total_count),
+    aggregates: {
+      sum_net_payable_paise: Number(agg.sum_net_payable_paise),
+      sum_gross_paise: Number(agg.sum_gross_paise),
+      count_by_status: {
+        DRAFT: Number(agg.count_draft),
+        FINALIZED: Number(agg.count_finalized),
+        INVOICED: Number(agg.count_invoiced),
+        CANCELLED: Number(agg.count_cancelled),
+      },
+    },
+  };
+}
+
 module.exports = {
   insert,
   findById,
@@ -404,4 +592,5 @@ module.exports = {
   findByIdForUpdate,
   transitionStatus,
   updateDraft,
+  list,
 };
