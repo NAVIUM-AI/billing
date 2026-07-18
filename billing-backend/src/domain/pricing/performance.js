@@ -6,6 +6,8 @@
  * Zero external imports by design — see local.js for why.
  */
 
+const { DomainInputError } = require("./errors");
+
 function calculatePerformance(rule, usage) {
   assertPerfRule(rule);
   const running_km = usage.running_km ?? 0;
@@ -39,13 +41,19 @@ function calculatePerformance(rule, usage) {
 function assertPerfRule(r) {
   ["per_km_rate_paise", "performance_batta_paise"].forEach((k) => {
     if (r[k] === undefined || r[k] === null) {
-      throw new TypeError(`PERFORMANCE rule missing field: ${k}`);
+      throw new DomainInputError(`PERFORMANCE rule missing field: ${k}`, {
+        field: k,
+        reason: "RULE_FIELD_MISSING",
+      });
     }
   });
 }
 function assertNonNegInteger(n, name) {
   if (!Number.isInteger(n) || n < 0) {
-    throw new TypeError(`${name} must be a non-negative integer`);
+    throw new DomainInputError(`${name} must be a non-negative integer`, {
+      field: name,
+      reason: "USAGE_INVALID",
+    });
   }
 }
 
