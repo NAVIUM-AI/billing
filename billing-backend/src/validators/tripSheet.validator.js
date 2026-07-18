@@ -132,6 +132,64 @@ const createTripSheetSchema = Joi.object({
   remarks: Joi.string().max(2000),
 });
 
+// All fields optional, editable-in-DRAFT versions of createTripSheetSchema's
+// data fields. Deliberately does NOT include service_type, billing_mode,
+// customer_id, vehicle_id, or anything identity/audit-shaped — those
+// define the trip and are immutable even in DRAFT (see
+// tripSheet.repository.js#DRAFT_UPDATABLE_COLUMNS, the enforcement
+// layer this schema's omissions mirror).
+//
+// `.unknown(false)` is explicit here, not left to Joi.object()'s
+// default: the shared validate() middleware (src/middleware/validate.js)
+// always passes `stripUnknown: true`, which — confirmed empirically
+// while building this schema — SILENTLY STRIPS an unrecognized key
+// instead of erroring unless the schema itself calls `.unknown(false)`.
+// Without this explicit call, a PATCH body like
+// `{ total_km: 5, customer_id: "..." }` would have `customer_id`
+// quietly dropped rather than rejected — exactly the kind of "looks
+// like it worked, actually did something else" bug Rule 6 (fail early)
+// exists to prevent.
+const updateTripSheetSchema = Joi.object({
+  trip_date: tripDateField,
+  start_datetime: Joi.date().iso(),
+  end_datetime: Joi.date().iso(),
+
+  opening_km: Joi.number().integer().min(0),
+  closing_km: Joi.number().integer().min(0),
+  total_km: Joi.number().integer().min(0),
+  total_hours: Joi.number().integer().min(0),
+  total_days: Joi.number().integer().min(1).max(90),
+
+  toll_rupees: Joi.number().min(0),
+  parking_rupees: Joi.number().min(0),
+  permit_rupees: Joi.number().min(0),
+  fasttag_rupees: Joi.number().min(0),
+  advance_rupees: Joi.number().min(0),
+
+  // Same tolls-vs-toll_rupees mutex constraint as createTripSheetSchema
+  // is enforced in the service (tripSheet.service.js), not here — see
+  // that schema's tollReceiptSchema comment for why.
+  tolls: Joi.array().items(tollReceiptSchema).max(50),
+
+  booked_by: Joi.string().max(255),
+  pax_note: Joi.string().max(255),
+  remarks: Joi.string().max(2000),
+
+  driver_id: Joi.string().guid({ version: "uuidv4" }).allow(null),
+})
+  .unknown(false)
+  .min(1)
+  .messages({
+    "object.min": "Provide at least one field to update.",
+  });
+
+// Cancellation reason is required — legally necessary in many audit
+// contexts, and there's no cancel-without-explanation path in this
+// system.
+const cancelTripSchema = Joi.object({
+  reason: Joi.string().trim().min(3).max(500).required(),
+}).unknown(false);
+
 const tripIdParamSchema = Joi.object({
   tripId: Joi.string().guid({ version: "uuidv4" }).required(),
 });
@@ -140,5 +198,7 @@ module.exports = {
   SERVICE_TYPES,
   BILLING_MODES,
   createTripSheetSchema,
+  updateTripSheetSchema,
+  cancelTripSchema,
   tripIdParamSchema,
 };

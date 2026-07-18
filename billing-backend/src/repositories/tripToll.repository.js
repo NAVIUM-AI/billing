@@ -5,10 +5,11 @@
  * convention as tripSheet.repository.js and the rest of the Module 2/3
  * repositories. No `pool` fallback.
  *
- * Tolls are append-only in this task (Task 3.2): no update path, no
- * delete path except cascade-with-parent (ON DELETE CASCADE on
- * trip_sheet_id). PATCH support ships in Task 3.3 alongside draft trip
- * editing.
+ * Tolls were append-only through Task 3.2 (no update/delete path
+ * except cascade-with-parent). Task 3.3 adds `deleteByTrip`, used only
+ * for the atomic delete-then-reinsert a DRAFT PATCH does when its
+ * `tolls` array is explicitly present — never exposed as a standalone
+ * "delete a toll" operation.
  */
 
 const COLUMNS_PER_ROW = 10;
@@ -76,4 +77,24 @@ async function listByTrip(tenantId, tripSheetId, client) {
   return result.rows;
 }
 
-module.exports = { insertBatch, listByTrip };
+/**
+ * Deletes every toll row for a trip. `client` is REQUIRED — this is
+ * only ever called immediately before `insertBatch` inside the same
+ * transaction as a DRAFT PATCH's trip_sheets update, so the delete and
+ * the reinsert land atomically: there's no committed state where an
+ * FK-referenced trip has zero tolls when the caller actually sent a
+ * replacement list.
+ *
+ * @param {string} tenantId
+ * @param {string} tripSheetId
+ * @param {import('pg').PoolClient} client
+ * @returns {Promise<void>}
+ */
+async function deleteByTrip(tenantId, tripSheetId, client) {
+  await client.query(
+    "DELETE FROM trip_tolls WHERE trip_sheet_id = $1 AND tenant_id = $2",
+    [tripSheetId, tenantId],
+  );
+}
+
+module.exports = { insertBatch, listByTrip, deleteByTrip };
