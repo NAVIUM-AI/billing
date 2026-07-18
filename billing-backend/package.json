@@ -14,7 +14,8 @@
     "verify:vehicles": "bash scripts/verify-vehicles.sh",
     "verify:drivers": "bash scripts/verify-drivers.sh",
     "verify:customers": "bash scripts/verify-customers.sh",
-    "test:pricing": "node scripts/test-pricing-calc.js"
+    "test:pricing": "node scripts/test-pricing-calc.js",
+    "verify:pricing": "bash scripts/verify-pricing.sh"
   },
   "keywords": [],
   "author": "",
