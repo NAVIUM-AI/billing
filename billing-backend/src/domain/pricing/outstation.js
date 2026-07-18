@@ -14,6 +14,8 @@
  * Zero external imports by design — see local.js for why.
  */
 
+const { DomainInputError } = require("./errors");
+
 function calculateOutstation(rule, usage) {
   assertOutstationRule(rule);
   const total_km = usage.total_km ?? 0;
@@ -35,7 +37,10 @@ function calculateOutstation(rule, usage) {
   );
 
   if (total_days < 1) {
-    throw new TypeError("total_days must be >= 1");
+    throw new DomainInputError("total_days must be >= 1", {
+      field: "total_days",
+      reason: "USAGE_INVALID",
+    });
   }
 
   const min_km_total = rule.min_km_per_day * total_days;
@@ -82,13 +87,19 @@ function calculateOutstation(rule, usage) {
 function assertOutstationRule(r) {
   ["slab_rate_paise", "min_km_per_day", "driver_batta_per_day_paise"].forEach((k) => {
     if (r[k] === undefined || r[k] === null) {
-      throw new TypeError(`OUTSTATION rule missing field: ${k}`);
+      throw new DomainInputError(`OUTSTATION rule missing field: ${k}`, {
+        field: k,
+        reason: "RULE_FIELD_MISSING",
+      });
     }
   });
 }
 function assertNonNegInteger(n, name) {
   if (!Number.isInteger(n) || n < 0) {
-    throw new TypeError(`${name} must be a non-negative integer`);
+    throw new DomainInputError(`${name} must be a non-negative integer`, {
+      field: name,
+      reason: "USAGE_INVALID",
+    });
   }
 }
 

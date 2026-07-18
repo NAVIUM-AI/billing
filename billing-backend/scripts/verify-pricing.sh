@@ -55,7 +55,7 @@ RESET=$'\033[0m'
 
 PASS=0
 FAIL=0
-TOTAL_CHECKS=20
+TOTAL_CHECKS=25
 # See scripts/verify-auth.sh for why FAILED_STEPS is only ever expanded
 # with [@]/[*] behind a length check (bash 3.2 + `set -u` compatibility).
 FAILED_STEPS=()
@@ -382,7 +382,112 @@ else
   fail "Preview endpoint (post-hike): total_paise differs from pre-hike" "got '$PREVIEW2_TOTAL'"
 fi
 
-# ─── Step 19: cross-tenant leak test ───
+# ─── Step 17/18 status capture (for Step 23's "no 500 anywhere in
+#     preview" check below) — lightweight status-only re-checks, kept
+#     separate from Steps 17/18's own body-parsing logic above so that
+#     logic stays untouched. ───
+PREVIEW1_STATUS=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE_URL/pricing/preview" \
+  -H "Authorization: Bearer $OWNER_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"rule_type\":\"LOCAL_PACKAGE\",\"vehicle_type\":\"SEDAN\",\"on_date\":\"$YESTERDAY\",\"usage\":{\"total_km\":217,\"total_hours\":12,\"toll_rupees\":0}}")
+PREVIEW2_STATUS=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE_URL/pricing/preview" \
+  -H "Authorization: Bearer $OWNER_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"rule_type\":\"LOCAL_PACKAGE\",\"vehicle_type\":\"SEDAN\",\"on_date\":\"$TODAY\",\"usage\":{\"total_km\":217,\"total_hours\":12,\"toll_rupees\":0}}")
+
+# ─── Task 2.6 regression coverage: POST /pricing/preview used to
+#     return a raw 500 INTERNAL_ERROR when `usage` was missing a field
+#     the resolved rule's calculator required, or held an invalid
+#     value — see docs/modules/module-2-master-data/known-issues.md.
+#     Fixed by introducing DomainInputError in the pure pricing domain
+#     (src/domain/pricing/errors.js) and translating it to a clean 400
+#     INVALID_CALCULATION_INPUT at the service boundary
+#     (pricingRule.service.js#previewCalculation). Steps 19-23 below
+#     lock that fix in place. ───
+
+# ─── Step 19: preview with usage missing required fields — the
+#     money shot, proves the fix works. ───
+STEP20A_STATUS=$(curl -s -o "$WORK_DIR/preview-missing.json" -w '%{http_code}' -X POST "$BASE_URL/pricing/preview" \
+  -H "Authorization: Bearer $OWNER_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"rule_type\":\"LOCAL_PACKAGE\",\"vehicle_type\":\"SEDAN\",\"on_date\":\"$TODAY\",\"usage\":{}}")
+STEP20A_CODE=$(jq -r '.error.code // empty' "$WORK_DIR/preview-missing.json")
+STEP20A_FIELD=$(jq -r '.error.details.field // empty' "$WORK_DIR/preview-missing.json")
+STEP20A_RULE_TYPE=$(jq -r '.error.details.rule_type // empty' "$WORK_DIR/preview-missing.json")
+
+STEP20A_REASONS=()
+[ "$STEP20A_STATUS" = "400" ] || STEP20A_REASONS+=("expected status 400, got '$STEP20A_STATUS'")
+[ "$STEP20A_CODE" = "INVALID_CALCULATION_INPUT" ] || STEP20A_REASONS+=("expected code INVALID_CALCULATION_INPUT, got '$STEP20A_CODE'")
+[ -n "$STEP20A_FIELD" ] || STEP20A_REASONS+=("expected details.field to be a non-empty string, got '$STEP20A_FIELD'")
+[ "$STEP20A_RULE_TYPE" = "LOCAL_PACKAGE" ] || STEP20A_REASONS+=("expected details.rule_type LOCAL_PACKAGE, got '$STEP20A_RULE_TYPE'")
+
+if [ ${#STEP20A_REASONS[@]} -eq 0 ]; then
+  pass "Preview with usage missing required fields: 400 INVALID_CALCULATION_INPUT, details.field='$STEP20A_FIELD', details.rule_type=LOCAL_PACKAGE (not a 500)"
+else
+  fail "Preview with usage missing required fields: 400 INVALID_CALCULATION_INPUT, details.field non-empty, details.rule_type=LOCAL_PACKAGE (not a 500)" "$(IFS='; '; echo "${STEP20A_REASONS[*]}")"
+fi
+
+# ─── Step 20: preview with an invalid (negative) usage value. ───
+STEP20B_STATUS=$(curl -s -o "$WORK_DIR/preview-negative.json" -w '%{http_code}' -X POST "$BASE_URL/pricing/preview" \
+  -H "Authorization: Bearer $OWNER_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"rule_type\":\"LOCAL_PACKAGE\",\"vehicle_type\":\"SEDAN\",\"on_date\":\"$TODAY\",\"usage\":{\"total_km\":-100,\"total_hours\":8}}")
+STEP20B_CODE=$(jq -r '.error.code // empty' "$WORK_DIR/preview-negative.json")
+STEP20B_FIELD=$(jq -r '.error.details.field // empty' "$WORK_DIR/preview-negative.json")
+
+STEP20B_REASONS=()
+[ "$STEP20B_STATUS" = "400" ] || STEP20B_REASONS+=("expected status 400, got '$STEP20B_STATUS'")
+[ "$STEP20B_CODE" = "INVALID_CALCULATION_INPUT" ] || STEP20B_REASONS+=("expected code INVALID_CALCULATION_INPUT, got '$STEP20B_CODE'")
+[ "$STEP20B_FIELD" = "total_km" ] || STEP20B_REASONS+=("expected details.field total_km, got '$STEP20B_FIELD'")
+
+if [ ${#STEP20B_REASONS[@]} -eq 0 ]; then
+  pass "Preview with negative total_km: 400 INVALID_CALCULATION_INPUT, details.field=total_km"
+else
+  fail "Preview with negative total_km: 400 INVALID_CALCULATION_INPUT, details.field=total_km" "$(IFS='; '; echo "${STEP20B_REASONS[*]}")"
+fi
+
+# ─── Step 21: preview with an unknown rule_type. previewSchema's
+#     Joi enum ('LOCAL_PACKAGE'|'OUTSTATION_SLAB'|'PERFORMANCE') should
+#     reject this before it ever reaches the domain dispatch layer —
+#     but either a schema-level VALIDATION_ERROR or a domain-level
+#     INVALID_CALCULATION_INPUT is correct behavior (both are a clean
+#     4xx, neither is a 500), so both are accepted here. ───
+STEP20C_STATUS=$(curl -s -o "$WORK_DIR/preview-unknown-type.json" -w '%{http_code}' -X POST "$BASE_URL/pricing/preview" \
+  -H "Authorization: Bearer $OWNER_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"rule_type\":\"MYSTERY\",\"vehicle_type\":\"SEDAN\",\"on_date\":\"$TODAY\",\"usage\":{\"total_km\":100,\"total_hours\":8}}")
+STEP20C_CODE=$(jq -r '.error.code // empty' "$WORK_DIR/preview-unknown-type.json")
+
+if [ "$STEP20C_STATUS" = "400" ] && { [ "$STEP20C_CODE" = "VALIDATION_ERROR" ] || [ "$STEP20C_CODE" = "INVALID_CALCULATION_INPUT" ]; }; then
+  pass "Preview with unknown rule_type: 400 ($STEP20C_CODE fired — not a 500)"
+else
+  fail "Preview with unknown rule_type: 400 VALIDATION_ERROR or INVALID_CALCULATION_INPUT" "status '$STEP20C_STATUS', code '$STEP20C_CODE'"
+fi
+
+# ─── Step 22: happy path still works — re-run the Step 17 assertion
+#     verbatim to confirm the fix introduced no regression. ───
+STEP20D_RESPONSE=$(curl -s -w '\nHTTP_STATUS:%{http_code}' -X POST "$BASE_URL/pricing/preview" \
+  -H "Authorization: Bearer $OWNER_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"rule_type\":\"LOCAL_PACKAGE\",\"vehicle_type\":\"SEDAN\",\"on_date\":\"$YESTERDAY\",\"usage\":{\"total_km\":217,\"total_hours\":12,\"toll_rupees\":0}}")
+STEP20D_STATUS=$(echo "$STEP20D_RESPONSE" | grep -o 'HTTP_STATUS:[0-9]*' | cut -d: -f2)
+STEP20D_TOTAL=$(echo "$STEP20D_RESPONSE" | sed '$d' | jq -r '.result.total_paise // empty')
+
+if [ "$STEP20D_STATUS" = "200" ] && [ "$STEP20D_TOTAL" = "483800" ]; then
+  pass "Preview happy path regression check: 200, total_paise still 483800 (same as Step 17, before this fix)"
+else
+  fail "Preview happy path regression check: 200, total_paise still 483800" "status '$STEP20D_STATUS', total_paise '$STEP20D_TOTAL'"
+fi
+
+# ─── Step 23: no preview call anywhere in this script returned a
+#     raw 500 — the whole point of the fix. ───
+PREVIEW_STATUSES=("$PREVIEW1_STATUS" "$PREVIEW2_STATUS" "$STEP20A_STATUS" "$STEP20B_STATUS" "$STEP20C_STATUS" "$STEP20D_STATUS")
+STEP20E_REASONS=()
+for s in "${PREVIEW_STATUSES[@]}"; do
+  [ "$s" = "500" ] && STEP20E_REASONS+=("a preview call returned 500")
+done
+
+if [ ${#STEP20E_REASONS[@]} -eq 0 ]; then
+  pass "No preview call in this script returned 500 (statuses seen: ${PREVIEW_STATUSES[*]})"
+else
+  fail "No preview call in this script returned 500" "statuses seen: ${PREVIEW_STATUSES[*]}"
+fi
+
+# ─── Step 24: cross-tenant leak test ───
 LEAK_STATUS=$(curl -s -o "$WORK_DIR/leak.json" -w '%{http_code}' "$BASE_URL/pricing/rules/$RULE_ID_LOCAL_V1" \
   -H "Authorization: Bearer $OWNER_B_TOKEN")
 LEAK_CODE=$(jq -r '.error.code // empty' "$WORK_DIR/leak.json")
@@ -393,7 +498,7 @@ else
   fail "Cross-tenant GET /pricing/rules/{id} (tenant B reading tenant A's rule): 404 PRICING_RULE_NOT_FOUND" "status '$LEAK_STATUS', code '$LEAK_CODE'"
 fi
 
-# ─── Step 20: DB-layer isolation check ───
+# ─── Step 25: DB-layer isolation check ───
 DB_COUNT=$(psql -U "$DB_ROLE" -d "$DB_NAME" -tAc "SELECT COUNT(*) FROM pricing_rules;" 2>/dev/null | tr -d '[:space:]')
 
 if [ "$DB_COUNT" = "0" ]; then

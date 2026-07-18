@@ -7,7 +7,12 @@
  */
 
 const assert = require("node:assert/strict");
-const { calculateLocal, calculateOutstation, calculatePerformance } = require("../src/domain/pricing");
+const {
+  calculateLocal,
+  calculateOutstation,
+  calculatePerformance,
+  DomainInputError,
+} = require("../src/domain/pricing");
 
 let pass = 0,
   fail = 0;
@@ -164,6 +169,81 @@ check("Dispatch: routes by rule_type", () => {
   };
   const out = calculate(r, { total_km: 80, total_hours: 8, toll_paise: 0 });
   assert.equal(out.total_paise, 220000);
+});
+
+// ─── Error type check: missing rule field ───
+check("Local: missing base_price_paise throws DomainInputError", () => {
+  const rule = {
+    base_hours: 8,
+    base_km: 80,
+    // base_price_paise omitted intentionally
+    extra_km_rate_paise: 1400,
+    extra_hr_rate_paise: 18000,
+  };
+  assert.throws(
+    () => calculateLocal(rule, { total_km: 100, total_hours: 8 }),
+    (err) => {
+      assert.ok(err instanceof DomainInputError, "expected DomainInputError, got " + err.name);
+      assert.equal(err.field, "base_price_paise");
+      assert.equal(err.reason, "RULE_FIELD_MISSING");
+      return true;
+    },
+  );
+});
+
+check("Outstation: total_days < 1 throws DomainInputError", () => {
+  const rule = {
+    slab_rate_paise: 5000,
+    min_km_per_day: 300,
+    driver_batta_per_day_paise: 60000,
+  };
+  assert.throws(
+    () =>
+      calculateOutstation(rule, {
+        total_km: 500,
+        total_days: 0,
+      }),
+    (err) => {
+      assert.ok(err instanceof DomainInputError);
+      assert.equal(err.field, "total_days");
+      return true;
+    },
+  );
+});
+
+check("Performance: negative running_km throws DomainInputError", () => {
+  const rule = {
+    per_km_rate_paise: 1400,
+    performance_batta_paise: 30000,
+  };
+  assert.throws(
+    () =>
+      calculatePerformance(rule, {
+        running_km: -5,
+        toll_paise: 0,
+      }),
+    (err) => {
+      assert.ok(err instanceof DomainInputError);
+      assert.equal(err.field, "running_km");
+      return true;
+    },
+  );
+});
+
+check("Dispatch: unknown rule_type throws DomainInputError", () => {
+  const { calculate } = require("../src/domain/pricing");
+  assert.throws(
+    () =>
+      calculate(
+        { rule_type: "MYSTERY_MEAT" },
+        { total_km: 10 },
+      ),
+    (err) => {
+      assert.ok(err instanceof DomainInputError);
+      assert.equal(err.reason, "RULE_TYPE_UNKNOWN");
+      return true;
+    },
+  );
 });
 
 console.log(`\n${pass} passed, ${fail} failed`);

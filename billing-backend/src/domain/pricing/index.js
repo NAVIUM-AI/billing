@@ -8,4 +8,5 @@ module.exports = {
   calculateOutstation: require("./outstation"),
   calculatePerformance: require("./performance"),
   calculate: require("./dispatch"),
+  DomainInputError: require("./errors").DomainInputError,
 };
