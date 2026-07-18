@@ -39,6 +39,10 @@ module.exports = Object.freeze({
   "trips:read": ["owner", "admin", "accountant", "staff", "viewer"],
   "trips:write": ["owner", "admin", "accountant", "staff"],
   "trips:finalize": ["owner", "admin", "accountant"],
+  // Cancel destroys billable history, so it's a higher-privilege
+  // operation than write/finalize — staff can create, edit, and
+  // finalize trips, but only accountant/admin/owner can cancel one.
+  "trips:cancel": ["owner", "admin", "accountant"],
   "invoices:read": ["owner", "admin", "accountant", "viewer"],
   "invoices:draft": ["owner", "admin", "accountant", "staff"],
   "invoices:issue": ["owner", "admin", "accountant"],

@@ -20,6 +20,7 @@
  */
 
 const { calculate, DomainInputError } = require("../domain/pricing");
+const { isValidTransition, allowedTransitions } = require("../domain/tripLifecycle");
 const { rupeesToPaise } = require("../utils/money");
 const { toIndianFY } = require("../utils/fiscalYear");
 const tsn = require("../utils/tripSheetNumber");
@@ -55,6 +56,33 @@ function deriveRuleType(serviceType, billingMode) {
    * inputs to their two allowed values each, so all four combinations
    * are covered above; this is unreachable in practice. */
   throw new Error(`Unhandled service_type/billing_mode combination: ${serviceType}/${billingMode}`);
+}
+
+/**
+ * Guard: assert that a trip's current status permits a transition to
+ * `toStatus`. Throws a clean 409 with the state machine's own
+ * `allowed_transitions` list attached, rather than a generic
+ * "something went wrong" — a client (or another developer reading a
+ * failed request in a log) can tell from `error.details` alone what
+ * transitions WOULD have worked, without having to know the state
+ * machine's shape ahead of time.
+ *
+ * @param {{ status: string }} trip
+ * @param {string} toStatus
+ */
+function assertTransition(trip, toStatus) {
+  if (!isValidTransition(trip.status, toStatus)) {
+    throw apiError(
+      409,
+      "INVALID_STATE_TRANSITION",
+      `Trip in status '${trip.status}' cannot transition to '${toStatus}'.`,
+      {
+        current_status: trip.status,
+        requested_status: toStatus,
+        allowed_transitions: allowedTransitions(trip.status),
+      },
+    );
+  }
 }
 
 /**
@@ -192,84 +220,22 @@ async function createTripSheet(tenantId, input, actorUserId, db) {
       );
     }
 
-    // (e) Compute pricing via the pure calculator.
+    // (e) Compute pricing via the pure calculator, and (f) derive
+    // computed totals from the result — shared with updateTripSheet's
+    // recompute so the two can never drift apart.
     const ruleForCalc = { rule_type: rule.rule_type, ...rule };
-    let usage;
-    if (billingMode === "PERFORMANCE") {
-      // Same shape for LOCAL and OUTSTATION performance — sum km with
-      // batta and toll. Service_type doesn't affect this branch at all.
-      usage = { running_km: input.total_km, toll_paise: tollPaise };
-    } else if (serviceType === "OUTSTATION") {
-      // OUTSTATION GST (slab-based).
-      usage = {
-        total_km: input.total_km,
-        total_days: input.total_days,
-        toll_paise: tollPaise,
-        parking_paise: parkingPaise,
-        permit_paise: permitPaise,
-        fasttag_paise: fasttagPaise,
-        advance_paise: advancePaise,
-      };
-    } else {
-      // LOCAL GST — unchanged from Task 3.1.
-      usage = { total_km: input.total_km, total_hours: input.total_hours, toll_paise: tollPaise };
-    }
-
-    let calcResult;
-    try {
-      calcResult = calculate(ruleForCalc, usage);
-    } catch (err) {
-      if (err instanceof DomainInputError) {
-        throw apiError(400, "INVALID_CALCULATION_INPUT", err.message, {
-          field: err.field,
-          reason: err.reason,
-          rule_type: rule.rule_type,
-        });
-      }
-      throw err; // truly unexpected -> 500 is correct
-    }
-
-    // (f) Derive computed totals from the calculator result.
-    let baseAmountPaise;
-    let extrasAmountPaise;
-    let driverBattaPaise;
-    let subtotalPaise;
-    let grossPaise;
-    let netPayablePaise;
-    if (ruleType === "LOCAL_PACKAGE") {
-      baseAmountPaise = calcResult.base_paise;
-      extrasAmountPaise = calcResult.extra_km_paise + calcResult.extra_hours_paise;
-      driverBattaPaise = 0;
-      subtotalPaise = calcResult.subtotal_paise;
-      // Advance is intentionally NOT applied to LOCAL trips at trip
-      // level — see the outstation advance-at-invoice note below.
-      // gross === net for LOCAL_PACKAGE.
-      grossPaise = subtotalPaise;
-      netPayablePaise = grossPaise;
-    } else if (ruleType === "OUTSTATION_SLAB") {
-      baseAmountPaise = calcResult.slab_paise;
-      // toll_paise is tracked in its own trip_sheets column (like
-      // LOCAL_PACKAGE), so it's deliberately excluded here — extras is
-      // parking + permit + fasttag only.
-      extrasAmountPaise = calcResult.parking_paise + calcResult.permit_paise + calcResult.fasttag_paise;
-      driverBattaPaise = calcResult.batta_paise;
-      subtotalPaise = calcResult.gross_paise;
-      grossPaise = calcResult.gross_paise;
-      // Unlike LOCAL, advance IS deducted here: net_payable = gross -
-      // advance for OUTSTATION (the Niriksha CI-1905 reference).
-      // Invoice-level advance handling for combined B2B billing is
-      // Module 4's concern, not this trip-level figure.
-      netPayablePaise = calcResult.net_payable_paise;
-    } else {
-      // PERFORMANCE — identical calculator output shape regardless of
-      // service_type (LOCAL or OUTSTATION), so one branch covers both.
-      baseAmountPaise = calcResult.km_paise;
-      extrasAmountPaise = 0;
-      driverBattaPaise = calcResult.batta_paise;
-      subtotalPaise = calcResult.total_paise;
-      grossPaise = subtotalPaise;
-      netPayablePaise = grossPaise;
-    }
+    const { calcResult, totals } = computeTripTotals(ruleForCalc, ruleType, serviceType, billingMode, {
+      totalKm: input.total_km,
+      totalHours: input.total_hours,
+      totalDays: input.total_days,
+      tollPaise,
+      parkingPaise,
+      permitPaise,
+      fasttagPaise,
+      advancePaise,
+    });
+    const { baseAmountPaise, extrasAmountPaise, driverBattaPaise, subtotalPaise, grossPaise, netPayablePaise } =
+      totals;
 
     // (g) Allocate the trip sheet number.
     const tenant = await tenantRepo.findById(tenantId, client);
@@ -366,4 +332,449 @@ async function getTripSheet(tenantId, id, db) {
   return trip;
 }
 
-module.exports = { createTripSheet, getTripSheet };
+/**
+ * Recomputes pricing for the effective (patch merged onto existing
+ * trip) usage values, using the SAME rule the trip was originally
+ * priced against — via `trip.pricing_rule_id` if that rule still
+ * exists, falling back to the trip's own immutable snapshot fields
+ * otherwise. This deliberately never calls ruleRepo.findApplicable():
+ * doing so could silently pick up a newer rule that has since
+ * superseded the original (a rule's rate columns are themselves
+ * immutable — supersede only ever touches the OLD row's effective_to,
+ * never its rates — so findById on the original id is guaranteed to
+ * return the same numbers as the snapshot; this is belt-and-suspenders
+ * consistency between the two, not a case where they could diverge).
+ *
+ * @param {string} tenantId
+ * @param {object} trip - current trip_sheets row
+ * @param {import('pg').PoolClient} client
+ * @returns {Promise<object>} a rule-shaped object usable by calculate()
+ */
+async function resolveRuleForRecompute(tenantId, trip, client) {
+  if (trip.pricing_rule_id) {
+    const ruleRow = await ruleRepo.findById(tenantId, trip.pricing_rule_id, client);
+    if (ruleRow) {
+      return { rule_type: ruleRow.rule_type, ...ruleRow };
+    }
+  }
+  // Rule was hard-deleted or never linked — the snapshot IS the truth
+  // (ADR-005).
+  return {
+    rule_type: deriveRuleType(trip.service_type, trip.billing_mode),
+    base_hours: trip.snap_base_hours,
+    base_km: trip.snap_base_km,
+    base_price_paise: trip.snap_base_price_paise,
+    extra_km_rate_paise: trip.snap_extra_km_rate_paise,
+    extra_hr_rate_paise: trip.snap_extra_hr_rate_paise,
+    slab_rate_paise: trip.snap_slab_rate_paise,
+    min_km_per_day: trip.snap_min_km_per_day,
+    driver_batta_per_day_paise: trip.snap_driver_batta_per_day_paise,
+    per_km_rate_paise: trip.snap_per_km_rate_paise,
+    performance_batta_paise: trip.snap_performance_batta_paise,
+  };
+}
+
+/**
+ * Runs the pure calculator for a trip's (possibly patch-merged) usage
+ * values and derives the same base/extras/batta/subtotal/gross/net
+ * breakdown createTripSheet computes — shared so PATCH's recompute and
+ * create's initial compute can never drift apart.
+ *
+ * @param {object} ruleForCalc
+ * @param {string} ruleType
+ * @param {string} serviceType
+ * @param {string} billingMode
+ * @param {{ totalKm: number, totalHours: number, totalDays: number, tollPaise: number, parkingPaise: number, permitPaise: number, fasttagPaise: number, advancePaise: number }} effective
+ * @returns {{ calcResult: object, totals: object }}
+ */
+function computeTripTotals(ruleForCalc, ruleType, serviceType, billingMode, effective) {
+  let usage;
+  if (billingMode === "PERFORMANCE") {
+    usage = { running_km: effective.totalKm, toll_paise: effective.tollPaise };
+  } else if (serviceType === "OUTSTATION") {
+    usage = {
+      total_km: effective.totalKm,
+      total_days: effective.totalDays,
+      toll_paise: effective.tollPaise,
+      parking_paise: effective.parkingPaise,
+      permit_paise: effective.permitPaise,
+      fasttag_paise: effective.fasttagPaise,
+      advance_paise: effective.advancePaise,
+    };
+  } else {
+    usage = { total_km: effective.totalKm, total_hours: effective.totalHours, toll_paise: effective.tollPaise };
+  }
+
+  let calcResult;
+  try {
+    calcResult = calculate(ruleForCalc, usage);
+  } catch (err) {
+    if (err instanceof DomainInputError) {
+      throw apiError(400, "INVALID_CALCULATION_INPUT", err.message, {
+        field: err.field,
+        reason: err.reason,
+        rule_type: ruleForCalc.rule_type,
+      });
+    }
+    throw err; // truly unexpected -> 500 is correct
+  }
+
+  let baseAmountPaise;
+  let extrasAmountPaise;
+  let driverBattaPaise;
+  let subtotalPaise;
+  let grossPaise;
+  let netPayablePaise;
+  if (ruleType === "LOCAL_PACKAGE") {
+    baseAmountPaise = calcResult.base_paise;
+    extrasAmountPaise = calcResult.extra_km_paise + calcResult.extra_hours_paise;
+    driverBattaPaise = 0;
+    subtotalPaise = calcResult.subtotal_paise;
+    grossPaise = subtotalPaise;
+    netPayablePaise = grossPaise;
+  } else if (ruleType === "OUTSTATION_SLAB") {
+    baseAmountPaise = calcResult.slab_paise;
+    extrasAmountPaise = calcResult.parking_paise + calcResult.permit_paise + calcResult.fasttag_paise;
+    driverBattaPaise = calcResult.batta_paise;
+    subtotalPaise = calcResult.gross_paise;
+    grossPaise = calcResult.gross_paise;
+    netPayablePaise = calcResult.net_payable_paise;
+  } else {
+    // PERFORMANCE
+    baseAmountPaise = calcResult.km_paise;
+    extrasAmountPaise = 0;
+    driverBattaPaise = calcResult.batta_paise;
+    subtotalPaise = calcResult.total_paise;
+    grossPaise = subtotalPaise;
+    netPayablePaise = grossPaise;
+  }
+
+  return {
+    calcResult,
+    totals: { baseAmountPaise, extrasAmountPaise, driverBattaPaise, subtotalPaise, grossPaise, netPayablePaise },
+  };
+}
+
+/**
+ * PATCH /trips/:tripId — editable only while a trip is DRAFT. Every
+ * charge/usage field is optional; whatever's present in `patch`
+ * overrides the trip's current value, and derived totals
+ * (base/extras/batta/subtotal/gross/net/breakdown) are ALWAYS
+ * recomputed as a group via the pricing engine — never patched
+ * independently — so they can never drift out of sync with the
+ * usage fields that produced them.
+ *
+ * @param {string} tenantId
+ * @param {string} id
+ * @param {object} patch - validated updateTripSheetSchema output
+ * @param {string} actorUserId
+ * @param {{ withTenantContext: Function }} db
+ * @returns {Promise<object>}
+ */
+async function updateTripSheet(tenantId, id, patch, actorUserId, db) {
+  // Step 1: Normalize.
+  const tollsInPatch = Object.prototype.hasOwnProperty.call(patch, "tolls");
+  const normalizedTolls = tollsInPatch ? normalizeTolls(patch.tolls) : null;
+
+  const explicitTollPaiseInPatch = patch.toll_rupees !== undefined ? rupeesToPaise(patch.toll_rupees) : undefined;
+  const parkingPaiseInPatch = patch.parking_rupees !== undefined ? rupeesToPaise(patch.parking_rupees) : undefined;
+  const permitPaiseInPatch = patch.permit_rupees !== undefined ? rupeesToPaise(patch.permit_rupees) : undefined;
+  const fasttagPaiseInPatch = patch.fasttag_rupees !== undefined ? rupeesToPaise(patch.fasttag_rupees) : undefined;
+  const advancePaiseInPatch = patch.advance_rupees !== undefined ? rupeesToPaise(patch.advance_rupees) : undefined;
+
+  // Step 2: Derive. Nothing new — FY/numbering are set once at create
+  // and never revisited.
+
+  // Step 3: Validate.
+  if (
+    patch.opening_km !== undefined &&
+    patch.closing_km !== undefined &&
+    patch.closing_km < patch.opening_km
+  ) {
+    throw apiError(400, "INVALID_KM_RANGE", "closing_km must be >= opening_km");
+  }
+
+  // Same sum-vs-array mutex as createTripSheet, adapted for PATCH: only
+  // a genuinely non-empty itemized array conflicts with a genuinely
+  // nonzero lump sum. An explicitly-empty `tolls: []` alongside a new
+  // `toll_rupees` is NOT a conflict — that's "switch from itemized to
+  // lump-sum in one request", a legitimate edit, not an ambiguous one.
+  if (tollsInPatch && normalizedTolls.length > 0 && (explicitTollPaiseInPatch ?? 0) > 0) {
+    throw apiError(
+      400,
+      "TOLL_INPUT_CONFLICT",
+      "Provide either a lump-sum toll_rupees OR an itemized tolls array — not both.",
+      { toll_rupees: patch.toll_rupees, tolls_count: normalizedTolls.length },
+    );
+  }
+
+  // Steps 4 + 5: Check (DB state) + Write, as one transaction.
+  return db.withTenantContext(async (client) => {
+    // (a) Row-lock. Concurrency safety net — a concurrent finalize/
+    // cancel/PATCH on the same trip blocks here until this transaction
+    // commits or rolls back.
+    const trip = await tripRepo.findByIdForUpdate(tenantId, id, client);
+    if (!trip) {
+      throw apiError(404, "TRIP_NOT_FOUND", "Trip sheet not found.");
+    }
+
+    // (b) Guard status.
+    if (trip.status !== "DRAFT") {
+      throw apiError(
+        409,
+        "TRIP_NOT_EDITABLE",
+        `Trip is in status '${trip.status}'. Only DRAFT trips can be edited.`,
+        { current_status: trip.status },
+      );
+    }
+
+    // (c) driver_id, if touched. null unlinks the driver; a nonzero id
+    // must resolve to a real driver (inactive is fine — same
+    // reasoning as createTripSheet).
+    if (Object.prototype.hasOwnProperty.call(patch, "driver_id") && patch.driver_id) {
+      const driver = await drvRepo.findById(tenantId, patch.driver_id, client);
+      if (!driver) {
+        throw apiError(404, "DRIVER_NOT_FOUND", "Driver not found.");
+      }
+    }
+
+    // (d) Recompute derived totals via the pricing engine, using the
+    // SAME rule the trip already carries (never an implicit lookup —
+    // see resolveRuleForRecompute's comment).
+    const ruleType = deriveRuleType(trip.service_type, trip.billing_mode);
+    const ruleForCalc = await resolveRuleForRecompute(tenantId, trip, client);
+
+    const effectiveTotalKm = patch.total_km ?? trip.total_km;
+    const effectiveTotalHours = patch.total_hours ?? trip.total_hours;
+    const effectiveTotalDays = patch.total_days ?? trip.total_days;
+
+    // Toll: itemized array wins if present in patch (summed, or 0 if
+    // cleared to [] with no accompanying lump value); else patch's
+    // lump toll_rupees; else the trip's existing toll_paise.
+    let effectiveTollPaise;
+    if (tollsInPatch) {
+      effectiveTollPaise =
+        normalizedTolls.length > 0
+          ? normalizedTolls.reduce((sum, t) => sum + t.amountPaise, 0)
+          : (explicitTollPaiseInPatch ?? 0);
+    } else if (explicitTollPaiseInPatch !== undefined) {
+      effectiveTollPaise = explicitTollPaiseInPatch;
+    } else {
+      effectiveTollPaise = trip.toll_paise;
+    }
+
+    const effectiveParkingPaise = parkingPaiseInPatch !== undefined ? parkingPaiseInPatch : trip.parking_paise;
+    const effectivePermitPaise = permitPaiseInPatch !== undefined ? permitPaiseInPatch : trip.permit_paise;
+    const effectiveFasttagPaise = fasttagPaiseInPatch !== undefined ? fasttagPaiseInPatch : trip.fasttag_paise;
+    const effectiveAdvancePaise = advancePaiseInPatch !== undefined ? advancePaiseInPatch : trip.advance_paise;
+
+    const { calcResult, totals } = computeTripTotals(ruleForCalc, ruleType, trip.service_type, trip.billing_mode, {
+      totalKm: effectiveTotalKm,
+      totalHours: effectiveTotalHours,
+      totalDays: effectiveTotalDays,
+      tollPaise: effectiveTollPaise,
+      parkingPaise: effectiveParkingPaise,
+      permitPaise: effectivePermitPaise,
+      fasttagPaise: effectiveFasttagPaise,
+      advancePaise: effectiveAdvancePaise,
+    });
+
+    // (f) Build the whitelisted repo patch. Derived totals are always
+    // included (Step 1's note: recomputed as a group on every PATCH).
+    const patchToDb = {
+      base_amount_paise: totals.baseAmountPaise,
+      extras_amount_paise: totals.extrasAmountPaise,
+      driver_batta_paise: totals.driverBattaPaise,
+      subtotal_paise: totals.subtotalPaise,
+      gross_paise: totals.grossPaise,
+      net_payable_paise: totals.netPayablePaise,
+      breakdown: calcResult.breakdown,
+      toll_paise: effectiveTollPaise,
+      parking_paise: effectiveParkingPaise,
+      permit_paise: effectivePermitPaise,
+      fasttag_paise: effectiveFasttagPaise,
+      advance_paise: effectiveAdvancePaise,
+    };
+    if (patch.trip_date !== undefined) patchToDb.trip_date = patch.trip_date;
+    if (patch.start_datetime !== undefined) patchToDb.start_datetime = patch.start_datetime;
+    if (patch.end_datetime !== undefined) patchToDb.end_datetime = patch.end_datetime;
+    if (patch.opening_km !== undefined) patchToDb.opening_km = patch.opening_km;
+    if (patch.closing_km !== undefined) patchToDb.closing_km = patch.closing_km;
+    if (patch.total_km !== undefined) patchToDb.total_km = patch.total_km;
+    if (patch.total_hours !== undefined) patchToDb.total_hours = patch.total_hours;
+    if (patch.total_days !== undefined) patchToDb.total_days = patch.total_days;
+    if (patch.booked_by !== undefined) patchToDb.booked_by = patch.booked_by;
+    if (patch.pax_note !== undefined) patchToDb.pax_note = patch.pax_note;
+    if (patch.remarks !== undefined) patchToDb.remarks = patch.remarks;
+    if (Object.prototype.hasOwnProperty.call(patch, "driver_id")) patchToDb.driver_id = patch.driver_id;
+
+    // (g) Write.
+    const updated = await tripRepo.updateDraft(tenantId, id, patchToDb, client);
+    if (!updated) {
+      // Shouldn't happen — findByIdForUpdate already holds the row
+      // lock for this whole transaction — but defensive in case a
+      // lock was somehow released mid-transaction.
+      throw apiError(
+        409,
+        "TRIP_STATUS_CHANGED_DURING_UPDATE",
+        "Trip status changed while updating. Reload and retry.",
+        { trip_id: id },
+      );
+    }
+
+    // (h) Tolls: atomic delete-then-reinsert only if the patch
+    // explicitly touched the array; otherwise leave the existing
+    // toll rows alone and just read them back.
+    let tolls;
+    if (tollsInPatch) {
+      await tollRepo.deleteByTrip(tenantId, id, client);
+      tolls = normalizedTolls.length > 0 ? await tollRepo.insertBatch(tenantId, id, normalizedTolls, client) : [];
+    } else {
+      tolls = await tollRepo.listByTrip(tenantId, id, client);
+    }
+
+    // (i) Return.
+    return { ...updated, tolls };
+  });
+}
+
+/**
+ * POST /trips/:tripId/finalize — DRAFT -> FINALIZED. A pure state
+ * transition: no inputs beyond the trip id, no recomputation.
+ *
+ * @param {string} tenantId
+ * @param {string} id
+ * @param {string} actorUserId
+ * @param {{ withTenantContext: Function }} db
+ * @returns {Promise<object>}
+ */
+async function finalizeTripSheet(tenantId, id, actorUserId, db) {
+  return db.withTenantContext(async (client) => {
+    const trip = await tripRepo.findByIdForUpdate(tenantId, id, client);
+    if (!trip) {
+      throw apiError(404, "TRIP_NOT_FOUND", "Trip sheet not found.");
+    }
+
+    // Throws INVALID_STATE_TRANSITION if trip isn't DRAFT — distinct
+    // from updateTripSheet's TRIP_NOT_EDITABLE: that one tells the
+    // caller "edit isn't the right action here", this one is literally
+    // the state machine's own complaint. Both are 409; the codes
+    // differ by semantic intent.
+    assertTransition(trip, "FINALIZED");
+
+    const updated = await tripRepo.transitionStatus(
+      tenantId,
+      id,
+      trip.status,
+      "FINALIZED",
+      { finalizedAt: new Date(), finalizedBy: actorUserId },
+      client,
+    );
+    if (!updated) {
+      // Someone else transitioned between findByIdForUpdate and the
+      // UPDATE. Shouldn't happen under the row lock — defensive
+      // belt-and-suspenders.
+      throw apiError(409, "TRIP_STATUS_CHANGED", "Trip status changed. Reload and retry.", { trip_id: id });
+    }
+
+    const tolls = await tollRepo.listByTrip(tenantId, id, client);
+    return { ...updated, tolls };
+  });
+}
+
+/**
+ * POST /trips/:tripId/cancel — DRAFT|FINALIZED -> CANCELLED. Requires
+ * a reason (Joi enforces min-length; trimmed here). Tolls are left
+ * untouched — they remain part of the audit trail even on a cancelled
+ * trip.
+ *
+ * @param {string} tenantId
+ * @param {string} id
+ * @param {{ reason: string }} input - validated cancelTripSchema output
+ * @param {string} actorUserId
+ * @param {{ withTenantContext: Function }} db
+ * @returns {Promise<object>}
+ */
+async function cancelTripSheet(tenantId, id, { reason }, actorUserId, db) {
+  // Step 1: Normalize.
+  const trimmedReason = reason.trim();
+
+  return db.withTenantContext(async (client) => {
+    const trip = await tripRepo.findByIdForUpdate(tenantId, id, client);
+    if (!trip) {
+      throw apiError(404, "TRIP_NOT_FOUND", "Trip sheet not found.");
+    }
+
+    // Rejects an already-CANCELLED trip and an INVOICED one (which
+    // needs a credit-note reversal instead) with INVALID_STATE_TRANSITION.
+    assertTransition(trip, "CANCELLED");
+
+    const updated = await tripRepo.transitionStatus(
+      tenantId,
+      id,
+      // `from` is the trip's OWN current status (DRAFT or FINALIZED),
+      // not hardcoded — both are valid cancellation sources.
+      trip.status,
+      "CANCELLED",
+      { cancelledAt: new Date(), cancelledBy: actorUserId, cancellationReason: trimmedReason },
+      client,
+    );
+    if (!updated) {
+      throw apiError(409, "TRIP_STATUS_CHANGED", "Trip status changed. Reload and retry.", { trip_id: id });
+    }
+
+    const tolls = await tollRepo.listByTrip(tenantId, id, client);
+    return { ...updated, tolls };
+  });
+}
+
+/**
+ * Reserved for Module 4. Not exposed as an API endpoint. Module 4's
+ * invoice-issue flow calls this from within its own transaction,
+ * passing the same client (i.e. it should thread its own `client`
+ * through rather than opening a second `withTenantContext`, once that
+ * integration is built) so the trip's INVOICED transition and the
+ * invoice row's creation commit or roll back together.
+ *
+ * @param {string} tenantId
+ * @param {string} id
+ * @param {string} invoiceId
+ * @param {string} actorUserId - unused today; kept in the signature so
+ *   Module 4 doesn't have to change this function's shape to thread an
+ *   actor through once invoice-issue audit logging exists.
+ * @param {{ withTenantContext: Function }} db
+ * @returns {Promise<object>}
+ */
+// eslint-disable-next-line no-unused-vars
+async function markTripInvoiced(tenantId, id, invoiceId, actorUserId, db) {
+  return db.withTenantContext(async (client) => {
+    const trip = await tripRepo.findByIdForUpdate(tenantId, id, client);
+    if (!trip) {
+      throw apiError(404, "TRIP_NOT_FOUND", "Trip sheet not found.");
+    }
+
+    assertTransition(trip, "INVOICED");
+
+    const updated = await tripRepo.transitionStatus(
+      tenantId,
+      id,
+      trip.status,
+      "INVOICED",
+      { invoicedAt: new Date(), invoiceId },
+      client,
+    );
+    if (!updated) {
+      throw apiError(409, "TRIP_STATUS_CHANGED", "Trip status changed. Reload and retry.", { trip_id: id });
+    }
+    return updated;
+  });
+}
+
+module.exports = {
+  createTripSheet,
+  getTripSheet,
+  updateTripSheet,
+  finalizeTripSheet,
+  cancelTripSheet,
+  markTripInvoiced,
+};

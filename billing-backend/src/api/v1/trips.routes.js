@@ -2,11 +2,14 @@
  * Trip sheet routes, scoped to the current tenant. Thin by design —
  * validation lives in tripSheet.validator.js, business logic
  * (normalize/derive/validate/check/write, pricing dispatch, snapshotting,
- * FY-based numbering) in tripSheet.service.js.
+ * FY-based numbering, lifecycle transitions) in tripSheet.service.js.
  *
- * Task 3.1 ships create + get only. List (3.4) and lifecycle
- * transitions — finalize/cancel/invoice-linkage (3.3) — are deliberately
- * out of scope here.
+ * Task 3.1 shipped create + get. Task 3.3 adds PATCH (DRAFT-only edits)
+ * and the finalize/cancel transitions. List (Task 3.4) is still out of
+ * scope here. There is deliberately NO route for the INVOICED
+ * transition — markTripInvoiced exists only as a service function for
+ * Module 4 to call from its own transaction; hitting a fabricated
+ * /invoice route 404s automatically since no such route is registered.
  */
 
 const express = require("express");
@@ -15,7 +18,12 @@ const authenticate = require("../../middleware/authenticate");
 const tenantContext = require("../../middleware/tenantContext");
 const requirePermission = require("../../middleware/requirePermission");
 const validate = require("../../middleware/validate");
-const { createTripSheetSchema, tripIdParamSchema } = require("../../validators/tripSheet.validator");
+const {
+  createTripSheetSchema,
+  updateTripSheetSchema,
+  cancelTripSchema,
+  tripIdParamSchema,
+} = require("../../validators/tripSheet.validator");
 const tripSheetService = require("../../services/tripSheet.service");
 
 const router = express.Router();
@@ -43,6 +51,50 @@ router.get(
   validate(tripIdParamSchema, "params"),
   async (req, res) => {
     const trip = await tripSheetService.getTripSheet(req.tenantId, req.params.tripId, req.db);
+    res.json({ trip });
+  },
+);
+
+router.patch(
+  "/:tripId",
+  requirePermission("trips:write"),
+  validate(tripIdParamSchema, "params"),
+  validate(updateTripSheetSchema, "body"),
+  async (req, res) => {
+    const trip = await tripSheetService.updateTripSheet(
+      req.tenantId,
+      req.params.tripId,
+      req.body,
+      req.user.userId,
+      req.db,
+    );
+    res.json({ trip });
+  },
+);
+
+router.post(
+  "/:tripId/finalize",
+  requirePermission("trips:finalize"),
+  validate(tripIdParamSchema, "params"),
+  async (req, res) => {
+    const trip = await tripSheetService.finalizeTripSheet(req.tenantId, req.params.tripId, req.user.userId, req.db);
+    res.json({ trip });
+  },
+);
+
+router.post(
+  "/:tripId/cancel",
+  requirePermission("trips:cancel"),
+  validate(tripIdParamSchema, "params"),
+  validate(cancelTripSchema, "body"),
+  async (req, res) => {
+    const trip = await tripSheetService.cancelTripSheet(
+      req.tenantId,
+      req.params.tripId,
+      req.body,
+      req.user.userId,
+      req.db,
+    );
     res.json({ trip });
   },
 );
