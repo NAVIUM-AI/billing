@@ -35,6 +35,8 @@
  * portable (see scripts/test-pricing-calc.js).
  */
 
+const { DomainInputError } = require("./errors");
+
 function calculateLocal(rule, usage) {
   assertLocalRule(rule);
   const { total_km, total_hours } = usage;
@@ -83,17 +85,28 @@ function calculateLocal(rule, usage) {
 
 // ─── local assertions ──────────────────
 function assertLocalRule(r) {
-  ["base_hours", "base_km", "base_price_paise", "extra_km_rate_paise", "extra_hr_rate_paise"].forEach(
-    (k) => {
-      if (r[k] === undefined || r[k] === null) {
-        throw new TypeError(`LOCAL rule missing field: ${k}`);
-      }
-    },
-  );
+  const required = [
+    "base_hours",
+    "base_km",
+    "base_price_paise",
+    "extra_km_rate_paise",
+    "extra_hr_rate_paise",
+  ];
+  for (const k of required) {
+    if (r[k] === undefined || r[k] === null) {
+      throw new DomainInputError(`LOCAL rule missing field: ${k}`, {
+        field: k,
+        reason: "RULE_FIELD_MISSING",
+      });
+    }
+  }
 }
 function assertNonNegInteger(n, name) {
   if (!Number.isInteger(n) || n < 0) {
-    throw new TypeError(`${name} must be a non-negative integer`);
+    throw new DomainInputError(`${name} must be a non-negative integer`, {
+      field: name,
+      reason: "USAGE_INVALID",
+    });
   }
 }
 

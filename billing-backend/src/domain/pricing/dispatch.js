@@ -7,6 +7,7 @@
 const local = require("./local");
 const outstation = require("./outstation");
 const performance = require("./performance");
+const { DomainInputError } = require("./errors");
 
 module.exports = function calculate(rule, usage) {
   switch (rule.rule_type) {
@@ -17,6 +18,9 @@ module.exports = function calculate(rule, usage) {
     case "PERFORMANCE":
       return performance(rule, usage);
     default:
-      throw new TypeError(`Unknown rule_type: ${rule.rule_type}`);
+      throw new DomainInputError(`Unknown rule_type: ${rule.rule_type}`, {
+        field: "rule_type",
+        reason: "RULE_TYPE_UNKNOWN",
+      });
   }
 };

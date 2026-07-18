@@ -41,6 +41,12 @@ const updateSettingsSchema = Joi.object({
     .max(20)
     .pattern(/^[A-Za-z0-9-]+$/),
 
+  trip_sheet_prefix: Joi.string()
+    .min(2)
+    .max(20)
+    .uppercase()
+    .pattern(/^[A-Za-z0-9-]+$/),
+
   bank_details: bankDetailsSchema,
 
   // Free-form JSONB — allow any keys, but cap the top-level key count

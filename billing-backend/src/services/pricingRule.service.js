@@ -5,10 +5,15 @@
  * Every create/supersede path follows the service-layer order locked
  * in from the Task 2.3 debrief: normalize -> derive -> validate ->
  * check -> write. See createRule() below for the canonical shape.
+ *
+ * Only previewCalculation currently consumes the pricing domain
+ * (src/domain/pricing/). When trip sheet creation (Module 3) or
+ * invoice generation (Module 4) consume it, use the same
+ * DomainInputError -> apiError translation shown there.
  */
 
 const pricingRuleRepository = require("../repositories/pricingRule.repository");
-const pricing = require("../domain/pricing");
+const { calculate, DomainInputError } = require("../domain/pricing");
 const { rupeesToPaise, formatINR } = require("../utils/money");
 const { apiError } = require("../utils/httpError");
 
@@ -348,7 +353,24 @@ async function previewCalculation(tenantId, { ruleType, vehicleType, onDate, usa
   const rule = await getApplicableRule(tenantId, { ruleType, vehicleType, onDate }, db);
 
   const normalizedUsage = normalizeUsage(usage);
-  const result = pricing.calculate(rule, normalizedUsage);
+
+  // Pure calculators throw DomainInputError for bad input. Translate to
+  // a clean 400 here rather than letting it fall through to the global
+  // handler as 500. See ADR-006 and Standing Rule 5.
+  let result;
+  try {
+    result = calculate(rule, normalizedUsage);
+  } catch (err) {
+    if (err instanceof DomainInputError) {
+      throw apiError(400, "INVALID_CALCULATION_INPUT", err.message, {
+        field: err.field,
+        reason: err.reason,
+        rule_type: rule.rule_type,
+        rule_id: rule.id,
+      });
+    }
+    throw err; // truly unexpected -> 500 is correct
+  }
 
   return {
     rule: {

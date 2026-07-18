@@ -82,12 +82,28 @@ if [ "$SERVER_STATUS" != "200" ]; then
 fi
 echo "  server reachable at $BASE_URL"
 
-# b) Is the Postgres container running?
-if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^billing-pg$'; then
-  printf '%sPostgres container '\''billing-pg'\'' is not running.\nStart it, e.g.:\n  docker start billing-pg%s\n' "$RED" "$RESET"
+# b) Is Postgres reachable? Direct psql against $DATABASE_URL — no
+# Docker container involved (this environment runs host Postgres) —
+# mirrors the preflight in verify-vehicles.sh / verify-customers.sh /
+# verify-trip-sheet-local.sh etc.
+if [ -z "${DATABASE_URL:-}" ] && [ -f .env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+fi
+if ! command -v psql >/dev/null 2>&1; then
+  printf '%spsql is required for this script.%s\n' "$RED" "$RESET"
   exit 1
 fi
-echo "  billing-pg container is running"
+DB_IDENTITY=$(psql "${DATABASE_URL:-}" -tAc "SELECT current_database(), current_user;" 2>/dev/null)
+if [ -z "$DB_IDENTITY" ]; then
+  printf '%sCould not connect to Postgres via DATABASE_URL.\nCheck DATABASE_URL in .env.%s\n' "$RED" "$RESET"
+  exit 1
+fi
+DB_NAME=$(echo "$DB_IDENTITY" | cut -d'|' -f1)
+DB_ROLE=$(echo "$DB_IDENTITY" | cut -d'|' -f2)
+echo "  connected to database '$DB_NAME' as role '$DB_ROLE'"
 
 # c) Is jq installed?
 if ! command -v jq >/dev/null 2>&1; then
@@ -236,13 +252,18 @@ else
 fi
 
 # ─── STEP 6: DB state matches expectation ───
-USER_ID=$(docker exec billing-pg psql -U billing -d billing_dev -tAc \
+# Direct psql against $DATABASE_URL (billing_app role), same as the
+# preflight above — no Docker container involved. users/refresh_tokens
+# predate the RLS migration (see enable_rls_and_ping.sql) and carry no
+# RLS policy, so billing_app (which owns every table) reads them
+# directly with no session var needed.
+USER_ID=$(psql "${DATABASE_URL:-}" -tAc \
   "SELECT id FROM users WHERE email='$TEST_EMAIL'" 2>/dev/null | tr -d '[:space:]')
 
 if [ -z "$USER_ID" ]; then
   fail "DB state: refresh_tokens rows for user are rotated + revoked as expected" "could not find user id for $TEST_EMAIL in the DB"
 else
-  ROWS=$(docker exec billing-pg psql -U billing -d billing_dev -tAc \
+  ROWS=$(psql "${DATABASE_URL:-}" -tAc \
     "SELECT id::text || '|' || (revoked_at IS NOT NULL)::text || '|' || (replaced_by IS NOT NULL)::text || '|' || issued_at::text
      FROM refresh_tokens WHERE user_id='$USER_ID' ORDER BY issued_at" 2>/dev/null)
 
