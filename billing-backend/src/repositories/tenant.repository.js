@@ -20,6 +20,7 @@ const UPDATABLE_COLUMNS = [
   "state_code",
   "logo_url",
   "invoice_prefix",
+  "trip_sheet_prefix",
   "bank_details",
   "settings",
 ];

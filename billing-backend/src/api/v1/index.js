@@ -15,6 +15,7 @@ const vehiclesRoutes = require("./vehicles.routes");
 const driversRoutes = require("./drivers.routes");
 const customersRoutes = require("./customers.routes");
 const pricingRoutes = require("./pricing.routes");
+const tripsRoutes = require("./trips.routes");
 
 const router = express.Router();
 
@@ -29,6 +30,7 @@ router.use("/vehicles", vehiclesRoutes);
 router.use("/drivers", driversRoutes);
 router.use("/customers", customersRoutes);
 router.use("/pricing", pricingRoutes);
+router.use("/trips", tripsRoutes);
 
 // Ping routes are a throwaway demo of tenant isolation. Delete once
 // Module 2 tables exist and RLS is proven in production.
