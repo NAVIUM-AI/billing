@@ -88,6 +88,8 @@ curl http://localhost:8000/health
 | `npm run verify:vehicles` | Run the automated vehicle master module check (see below) |
 | `npm run verify:drivers` | Run the automated driver master module check (see below) |
 | `npm run verify:customers` | Run the automated customer master module check (see below) |
+| `npm run test:pricing`   | Run the pure pricing-calculator unit tests (no DB, no server) |
+| `npm run verify:pricing` | Run the automated pricing rules engine check (see below) |
 
 ## Verifying auth module
 
@@ -428,6 +430,83 @@ CGST+SGST calculation at invoice time (Module 4), so a customer record
 with a self-contradictory state would silently produce the wrong tax
 split on every invoice raised against it.
 
+## Verifying pricing rules
+
+Two scripts cover the Task 2.4 pricing engine, and they test different
+things:
+
+`npm run test:pricing` (`scripts/test-pricing-calc.js`) is a
+stand-alone Node script — no DB, no server, just `node
+scripts/test-pricing-calc.js` — asserting the three pure calculators
+(`src/domain/pricing/`) against known numbers from real invoice
+references (a Cauvery Cars outstation invoice, a Niriksha Travel
+outstation invoice, and the Yellow UI local-package reference row).
+Run it any time you touch the calculator math; it catches a
+refactor that silently changes the arithmetic immediately, with no
+setup cost.
+
+`npm run verify:pricing` (`scripts/verify-pricing.sh`) exercises the
+full HTTP API end to end: RBAC (only owner/admin can write rates,
+never staff), rupee-to-paise normalization, the non-overlap exclusion
+constraint, per-rule-type required-field validation, list/filter,
+date-scoped applicable-rule lookup, immutable rate fields (`PATCH`
+only allows `label`/`notes`/`effective_to`), atomic supersede
+(versioning), the preview/calculation endpoint checked against the
+same Yellow UI reference numbers `test:pricing` uses, cross-tenant
+isolation, and DB-layer RLS. Requires `psql` and `jq`
+(`brew install jq` if missing).
+
+In one terminal:
+
+```bash
+npm run dev
+```
+
+In another:
+
+```bash
+npm run test:pricing && npm run verify:pricing
+```
+
+Expect: `7 passed, 0 failed` from `test:pricing`, then `✓ All 20
+checks passed. Pricing rules engine is working correctly.` from
+`verify:pricing` (exit code `0` for both).
+
+### Money handling: everything is paise
+
+All money in the system is stored and computed as **integer paise**
+(`src/utils/money.js` — 1 rupee = 100 paise). JavaScript float
+arithmetic on money is not safe (`0.1 + 0.2 !== 0.3`), so no
+calculation anywhere in `src/domain/pricing/` ever touches a decimal
+rupee value. The wire contract keeps the two units unambiguous by
+naming convention: request bodies accept `*_rupees` fields (decimal,
+UX-friendly — `"base_price_rupees": 2200`), which the service layer
+converts to `*_paise` before anything is validated against a
+rule-type's required fields or written to the database. Responses
+return the stored `*_paise` integers directly, plus — on the preview
+endpoint — a `formatted` object with human-readable `*_rupees` strings
+(`"total_rupees": "₹4,838.00"`) for display. Frontend and PDF
+rendering are the only places a paise value should ever be divided
+back into rupees.
+
+### Versioning of pricing rules
+
+A rate hike never overwrites a rule — `PATCH /pricing/rules/:id` only
+allows `label`, `notes`, and `effective_to`; every rate field is
+**immutable** once created. This is deliberate: an invoice issued in
+March at ₹2,200/day must still recompute at ₹2,200/day even after the
+rate is raised to ₹2,500/day in April. Changing a rate goes through
+`POST /pricing/rules/:id/supersede` instead, which atomically closes
+the existing rule's `effective_to` at the new rule's `effective_from`
+and opens the new rule as the current, open-ended version — so at any
+given date, at most one rule exists per (tenant, rule_type,
+vehicle_type), enforced by a Postgres exclusion constraint
+(`pricing_rules_no_overlap`), not just application logic. Looking up
+"the rate in effect on date X" (`GET /pricing/rules/applicable`) is
+what both the preview endpoint and, eventually, trip-sheet billing
+(Module 3+) use — it will keep returning the correct historical rate
+for a historical date even after several supersedes.
+
 ## Testing signup
 
 `POST /api/v1/auth/signup` creates a new tenant and its first (owner)
@@ -573,8 +652,14 @@ src/
 ├── repositories/    # SQL, one file per table
 ├── validators/      # Joi schemas
 ├── middleware/      # Express middleware (validation, auth, error handling, etc.)
-├── utils/           # Logger, password hashing, JWT/refresh-token helpers, slugify
+├── domain/pricing/  # Pure pricing calculators — zero framework imports (Task 2.4)
+├── utils/           # Logger, password hashing, JWT/refresh-token helpers, slugify, money, etc.
 ├── app.js           # Express app setup (middleware, routes)
 └── server.js         # Entry point — starts the HTTP server
 migrations/          # node-pg-migrate SQL migrations
+docs/                # Engineering documentation — see "Documentation" below
 ```
+
+## Documentation
+
+Full engineering docs live in `docs/`. Start at [`docs/README.md`](docs/README.md). Architecture Decision Records: [`docs/adr/`](docs/adr/README.md).
