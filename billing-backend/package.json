@@ -16,7 +16,8 @@
     "verify:customers": "bash scripts/verify-customers.sh",
     "test:pricing": "node scripts/test-pricing-calc.js",
     "verify:pricing": "bash scripts/verify-pricing.sh",
-    "verify:trips-local": "bash scripts/verify-trip-sheet-local.sh"
+    "verify:trips-local": "bash scripts/verify-trip-sheet-local.sh",
+    "verify:trips-outstation": "bash scripts/verify-trip-sheet-outstation.sh"
   },
   "keywords": [],
   "author": "",

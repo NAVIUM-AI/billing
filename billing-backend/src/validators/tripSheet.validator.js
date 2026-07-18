@@ -66,6 +66,25 @@ const tripDateField = Joi.string()
     "date.tripDateFuture": "trip_date cannot be in the future",
   });
 
+// One itemized toll-plaza receipt. For OUTSTATION trips: the tolls
+// array is the preferred input. toll_rupees is retained for backward
+// compatibility with LOCAL trips and for OUTSTATION trips where the
+// customer only provides a lump-sum receipt total. See
+// tripSheet.service.js for the cross-field rule (TOLL_INPUT_CONFLICT)
+// that rejects supplying both — that check needs to compare against
+// the *other* field in the request, which is exactly the kind of
+// cross-field concern this file's top comment says belongs in the
+// service, not here.
+const tollReceiptSchema = Joi.object({
+  plaza_name: Joi.string().trim().min(2).max(255).required(),
+  toll_id: Joi.string().trim().max(50).allow("", null),
+  amount_rupees: Joi.number().positive().max(50000).required(),
+  crossed_at: Joi.string().isoDate().allow(null),
+  vehicle_number: Joi.string().trim().max(30).allow("", null),
+  closing_balance_rupees: Joi.number().min(0).allow(null),
+  notes: Joi.string().max(500).allow("", null),
+});
+
 const createTripSheetSchema = Joi.object({
   service_type: Joi.string()
     .valid(...SERVICE_TYPES)
@@ -98,6 +117,15 @@ const createTripSheetSchema = Joi.object({
   permit_rupees: Joi.number().min(0).default(0),
   fasttag_rupees: Joi.number().min(0).default(0),
   advance_rupees: Joi.number().min(0).default(0),
+
+  // Itemized toll-plaza receipts (Task 3.2, OUTSTATION trips). Capped
+  // at 50 here in Joi, not the service, per the task's explicit
+  // constraint — a realistic outstation trip has well under 20. The
+  // trip row's toll_paise is DERIVED by summing this array when it's
+  // non-empty; the wire contract must not accept both this AND a
+  // nonzero toll_rupees on the same request (enforced in the service —
+  // see the top-of-file comment on tollReceiptSchema).
+  tolls: Joi.array().items(tollReceiptSchema).max(50).default([]),
 
   booked_by: Joi.string().max(255),
   pax_note: Joi.string().max(255),
