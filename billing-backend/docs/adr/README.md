@@ -21,3 +21,5 @@ Each ADR in this repository follows Michael Nygard's original format: **Status**
 | [ADR-004](ADR-004-normalize-in-service.md) | Normalization is a service-layer responsibility | Accepted | 2026-07-18 |
 | [ADR-005](ADR-005-versioned-pricing.md) | Pricing rules are versioned; rate values are immutable after create | Accepted | 2026-07-18 |
 | [ADR-006](ADR-006-domain-error-translation.md) | Pure domain modules throw a dedicated DomainInputError class; services translate to apiError at their boundary | Accepted | 2026-07-18 |
+| [ADR-007](ADR-007-selective-5xx-masking.md) | Selective 5xx message masking in the global error handler | Accepted | 2026-07-19 |
+| [ADR-008](ADR-008-auth-tables-no-rls.md) | Auth tables (users, refresh_tokens) are intentionally excluded from Row-Level Security | Accepted | 2026-07-19 |
