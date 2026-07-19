@@ -21,7 +21,9 @@ const {
   customerIdParamSchema,
   customerContactParamSchema,
 } = require("../../validators/customer.validator");
+const { invoiceableTripsQuerySchema } = require("../../validators/invoice.validator");
 const customerService = require("../../services/customer.service");
+const invoiceService = require("../../services/invoice.service");
 
 const router = express.Router();
 
@@ -161,6 +163,26 @@ router.delete(
       req.db,
     );
     res.status(204).end();
+  },
+);
+
+// Task 4.2: the invoice-drafting checkbox picker — "which of this
+// customer's trips can I put on an invoice right now." Gated on
+// invoices:draft (not customers:read) since it's preparatory for
+// building an invoice, not a customer-record view.
+router.get(
+  "/:customerId/invoiceable-trips",
+  requirePermission("invoices:draft"),
+  validate(customerIdParamSchema, "params"),
+  validate(invoiceableTripsQuerySchema, "query"),
+  async (req, res) => {
+    const data = await invoiceService.getInvoiceableTripsForCustomer(
+      req.tenantId,
+      req.params.customerId,
+      req.query,
+      req.db,
+    );
+    res.json(data);
   },
 );
 

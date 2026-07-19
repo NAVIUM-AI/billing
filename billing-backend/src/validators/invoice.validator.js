@@ -113,9 +113,33 @@ const invoiceIdParamSchema = Joi.object({
   invoiceId: Joi.string().guid({ version: "uuidv4" }).required(),
 });
 
+const invoiceLineParamSchema = Joi.object({
+  invoiceId: Joi.string().guid({ version: "uuidv4" }).required(),
+  lineId: Joi.string().guid({ version: "uuidv4" }).required(),
+});
+
+// Task 4.2: GET /customers/:id/invoiceable-trips. invoice_id is the
+// edit-case escape hatch — when set, the picker also includes trips
+// currently held by THAT invoice (so a trip already on the draft being
+// edited still shows as selectable, not silently missing).
+const invoiceableTripsQuerySchema = Joi.object({
+  invoice_id: Joi.string().guid({ version: "uuidv4" }),
+});
+
+// Task 4.2: PATCH /invoices/:invoiceId/lines/:lineId. Only description
+// is editable — see invoiceLine.repository.js#LINE_UPDATABLE_COLUMNS.
+const updateLineSchema = Joi.object({
+  description: Joi.string().trim().min(1).max(500).required(),
+})
+  .unknown(false)
+  .min(1);
+
 module.exports = {
   INVOICE_TYPES,
   createInvoiceSchema,
   updateInvoiceSchema,
   invoiceIdParamSchema,
+  invoiceLineParamSchema,
+  invoiceableTripsQuerySchema,
+  updateLineSchema,
 };

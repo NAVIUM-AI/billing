@@ -47,6 +47,10 @@ const DRAFT_UPDATABLE_COLUMNS = [
   "grand_total_paise",
   "net_payable_paise",
   "amount_in_words",
+  "toll_manual_override",
+  "parking_manual_override",
+  "permit_manual_override",
+  "fasttag_manual_override",
 ];
 
 /**
@@ -80,6 +84,10 @@ async function insertDraft(
     grandTotalPaise,
     netPayablePaise,
     amountInWords,
+    tollManualOverride,
+    parkingManualOverride,
+    permitManualOverride,
+    fasttagManualOverride,
     createdBy,
   },
   client,
@@ -93,7 +101,10 @@ async function insertDraft(
        toll_paise, parking_paise, permit_paise, fasttag_paise,
        discount_paise, discount_reason,
        round_off_paise, grand_total_paise, net_payable_paise,
-       amount_in_words, created_by
+       amount_in_words,
+       toll_manual_override, parking_manual_override,
+       permit_manual_override, fasttag_manual_override,
+       created_by
      )
      VALUES (
        $1, $2::invoice_type_enum, 'DRAFT'::invoice_status_enum, $3,
@@ -103,7 +114,10 @@ async function insertDraft(
        $14, $15, $16, $17,
        $18, $19,
        $20, $21, $22,
-       $23, $24
+       $23,
+       $24, $25,
+       $26, $27,
+       $28
      )
      RETURNING *`,
     [
@@ -130,6 +144,10 @@ async function insertDraft(
       grandTotalPaise,
       netPayablePaise,
       amountInWords,
+      Boolean(tollManualOverride),
+      Boolean(parkingManualOverride),
+      Boolean(permitManualOverride),
+      Boolean(fasttagManualOverride),
       createdBy || null,
     ],
   );

@@ -262,17 +262,28 @@ STEP1_REASONS=()
 [ "$(echo "$INV1_RESP" | jq -r '.invoice.sgst_paise')" = "224375" ] || STEP1_REASONS+=("sgst_paise != 224375")
 [ "$(echo "$INV1_RESP" | jq -r '.invoice.igst_paise')" = "0" ] || STEP1_REASONS+=("igst_paise != 0")
 [ "$(echo "$INV1_RESP" | jq -r '.invoice.total_gst_paise')" = "448750" ] || STEP1_REASONS+=("total_gst_paise != 448750")
-[ "$(echo "$INV1_RESP" | jq -r '.invoice.grand_total_paise')" = "9423750" ] || STEP1_REASONS+=("grand_total_paise != 9423750")
-[ "$(echo "$INV1_RESP" | jq -r '.invoice.net_payable_paise')" = "9423800" ] || STEP1_REASONS+=("net_payable_paise != 9423800")
+# Task 4.2: reimbursement columns now auto-sum from the selected trips'
+# own data at creation — T1 carries a ₹2,440 fasttag charge (set at
+# trip creation, below), so it auto-fills here with no PATCH needed.
+# That pushes grand_total/net_payable/amount_in_words to what Task 4.1
+# originally only reached after an explicit Step-2 PATCH; see
+# scripts/verify-invoice-picker.sh for the full auto-sum test surface.
+[ "$(echo "$INV1_RESP" | jq -r '.invoice.toll_paise')" = "0" ] || STEP1_REASONS+=("toll_paise != 0")
+[ "$(echo "$INV1_RESP" | jq -r '.invoice.parking_paise')" = "0" ] || STEP1_REASONS+=("parking_paise != 0")
+[ "$(echo "$INV1_RESP" | jq -r '.invoice.permit_paise')" = "0" ] || STEP1_REASONS+=("permit_paise != 0")
+[ "$(echo "$INV1_RESP" | jq -r '.invoice.fasttag_paise')" = "244000" ] || STEP1_REASONS+=("fasttag_paise != 244000 (auto-summed from T1)")
+[ "$(echo "$INV1_RESP" | jq -r '.invoice.fasttag_manual_override')" = "false" ] || STEP1_REASONS+=("fasttag_manual_override != false")
+[ "$(echo "$INV1_RESP" | jq -r '.invoice.grand_total_paise')" = "9667750" ] || STEP1_REASONS+=("grand_total_paise != 9667750, got $(echo "$INV1_RESP" | jq -r '.invoice.grand_total_paise')")
+[ "$(echo "$INV1_RESP" | jq -r '.invoice.net_payable_paise')" = "9667800" ] || STEP1_REASONS+=("net_payable_paise != 9667800")
 [ "$(echo "$INV1_RESP" | jq -r '.invoice.round_off_paise')" = "50" ] || STEP1_REASONS+=("round_off_paise != 50")
-echo "$INV1_RESP" | jq -r '.invoice.amount_in_words' | grep -q "Ninety Four" || STEP1_REASONS+=("amount_in_words missing 'Ninety Four'")
+echo "$INV1_RESP" | jq -r '.invoice.amount_in_words' | grep -q "Ninety Six Thousand Six Hundred Seventy Eight" || STEP1_REASONS+=("amount_in_words missing 'Ninety Six Thousand Six Hundred Seventy Eight'")
 [ "$(echo "$INV1_RESP" | jq '.invoice.lines | length')" = "1" ] || STEP1_REASONS+=("lines.length != 1")
 [ "$(echo "$INV1_RESP" | jq -r '.invoice.lines[0].vehicle_number')" = "$VEH_K_NUMBER" ] || STEP1_REASONS+=("lines[0].vehicle_number wrong")
 [ "$(echo "$INV1_RESP" | jq -r '.invoice.lines[0].line_amount_paise')" = "8975000" ] || STEP1_REASONS+=("lines[0].line_amount_paise != 8975000")
 [ "$(echo "$INV1_RESP" | jq -r '.invoice.lines[0].hsn_sac_code')" = "996601" ] || STEP1_REASONS+=("lines[0].hsn_sac_code != 996601")
 
 if [ -n "$INV_1" ] && [ ${#STEP1_REASONS[@]} -eq 0 ]; then
-  pass "TAX invoice from single OUTSTATION trip (intra-state): subtotal ₹89,750, CGST/SGST ₹2,243.75 each, net payable ₹94,238"
+  pass "TAX invoice from single OUTSTATION trip (intra-state): subtotal ₹89,750, CGST/SGST ₹2,243.75 each, fasttag auto-summed ₹2,440, net payable ₹96,678"
 else
   fail "TAX invoice creation (Step 1)" "$(IFS='; '; echo "${STEP1_REASONS[*]}") -- resp: $INV1_RESP"
 fi
@@ -286,17 +297,23 @@ else
   fail "Trip hold after invoice creation" "expected held_by_invoice_id '$INV_1', got '$HOLD_T1'"
 fi
 
-# ─── Step 2: PATCH adds fasttag_rupees, Cauvery-style totals recompute ───
+# ─── Step 2: PATCH the SAME fasttag amount explicitly — auto-sum -> manual override ───
+# Task 4.2: fasttag_paise was already 244000 via auto-sum (Step 1); this
+# PATCH supplies the identical rupee value explicitly, which shouldn't
+# change the number but MUST flip fasttag_manual_override to true (an
+# explicit choice, even one that happens to match the auto-sum, always
+# wins and is remembered — see computeEffectiveReimbursements).
 INV2_PATCH=$(curl -s -X PATCH "$BASE_URL/invoices/$INV_1" -H "Authorization: Bearer $ACCT_A_TOKEN" -H "Content-Type: application/json" \
   -d '{"fasttag_rupees":2440}')
 STEP2_REASONS=()
 [ "$(echo "$INV2_PATCH" | jq -r '.invoice.fasttag_paise')" = "244000" ] || STEP2_REASONS+=("fasttag_paise != 244000")
+[ "$(echo "$INV2_PATCH" | jq -r '.invoice.fasttag_manual_override')" = "true" ] || STEP2_REASONS+=("fasttag_manual_override != true")
 [ "$(echo "$INV2_PATCH" | jq -r '.invoice.grand_total_paise')" = "9667750" ] || STEP2_REASONS+=("grand_total_paise != 9667750, got $(echo "$INV2_PATCH" | jq -r '.invoice.grand_total_paise')")
 [ "$(echo "$INV2_PATCH" | jq -r '.invoice.net_payable_paise')" = "9667800" ] || STEP2_REASONS+=("net_payable_paise != 9667800")
 [ "$(echo "$INV2_PATCH" | jq -r '.invoice.subtotal_paise')" = "8975000" ] || STEP2_REASONS+=("subtotal_paise changed unexpectedly")
 
 if [ ${#STEP2_REASONS[@]} -eq 0 ]; then
-  pass "PATCH adds fasttag_rupees=2440: grand_total ₹96,677.50, net payable ₹96,678 (Cauvery's ₹92,190 was a no-GST proforma; ours correctly adds 5% GST on top)"
+  pass "PATCH fasttag_rupees=2440 (same value, now explicit): totals unchanged, fasttag_manual_override flips to true"
 else
   fail "PATCH fasttag_rupees (Step 2)" "$(IFS='; '; echo "${STEP2_REASONS[*]}")"
 fi
