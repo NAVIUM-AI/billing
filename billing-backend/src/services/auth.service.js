@@ -12,6 +12,7 @@ const userRepository = require("../repositories/user.repository");
 const refreshTokenRepository = require("../repositories/refreshToken.repository");
 const { hashPassword, verifyPassword } = require("../utils/password");
 const { slugify } = require("../utils/slugify");
+const { deriveInvoicePrefix, derivePerformancePrefix } = require("../utils/invoicePrefix");
 const { apiError } = require("../utils/httpError");
 const {
   signAccessToken,
@@ -84,12 +85,18 @@ async function signup({
 
   const passwordHash = await hashPassword(password);
 
+  // Task 4.1: auto-derive default invoice prefixes from the business
+  // name at signup, same as trip_sheet_prefix's hardcoded 'TS' default
+  // — both are editable afterward in settings.
+  const invoicePrefix = deriveInvoicePrefix(businessName);
+  const performancePrefix = derivePerformancePrefix(invoicePrefix);
+
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
 
     const tenant = await tenantRepository.insertTenant(
-      { name: businessName, slug, gstin, stateCode },
+      { name: businessName, slug, gstin, stateCode, invoicePrefix, performancePrefix },
       client,
     );
 

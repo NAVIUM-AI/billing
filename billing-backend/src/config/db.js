@@ -38,6 +38,22 @@ const env = require("./env");
 // for a value that represents a calendar date, not a point in time.
 types.setTypeParser(types.builtins.DATE, (val) => val);
 
+// By default, node-postgres returns a BIGINT column (OID 20, e.g. the
+// invoices table's *_paise columns) as a JS STRING, not a number —
+// correct in general (int8 can exceed Number.MAX_SAFE_INTEGER), but
+// every BIGINT column in this schema is a paise amount or a count that
+// will never get remotely close to that ceiling. Left unparsed, plain
+// arithmetic on these values breaks silently: `220000 + "0"` doesn't
+// throw, it string-concatenates to `"2200000"`, and the corruption only
+// surfaces several steps later (a domain function rejecting the final,
+// garbled result as "not an integer"). Parsing to Number here means
+// every layer above the DB driver — services, tests, and API responses
+// — sees a consistent JS number for money, matching every INTEGER
+// money column elsewhere in the schema, instead of two different wire
+// shapes for the same concept depending on which column happens to be
+// declared BIGINT vs INTEGER.
+types.setTypeParser(types.builtins.INT8, (val) => parseInt(val, 10));
+
 const pool = new Pool({
   connectionString: env.databaseUrl,
 });

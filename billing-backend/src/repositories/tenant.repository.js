@@ -87,17 +87,20 @@ async function updateProfile(tenantId, patch, client) {
 }
 
 /**
- * @param {{ name: string, slug: string, gstin?: string, stateCode?: string }} params
+ * @param {{ name: string, slug: string, gstin?: string, stateCode?: string, invoicePrefix?: string, performancePrefix?: string }} params
  * @param {import('pg').PoolClient} [client]
  * @returns {Promise<object>} the newly created tenant row
  */
-async function insertTenant({ name, slug, gstin, stateCode }, client) {
+async function insertTenant(
+  { name, slug, gstin, stateCode, invoicePrefix, performancePrefix },
+  client,
+) {
   const runner = client || pool;
   const result = await runner.query(
-    `INSERT INTO tenants (name, slug, gstin, state_code)
-     VALUES ($1, $2, $3, $4)
+    `INSERT INTO tenants (name, slug, gstin, state_code, invoice_prefix, performance_prefix)
+     VALUES ($1, $2, $3, $4, COALESCE($5, 'INV'), COALESCE($6, 'INV-PS'))
      RETURNING *`,
-    [name, slug, gstin || null, stateCode || null],
+    [name, slug, gstin || null, stateCode || null, invoicePrefix || null, performancePrefix || null],
   );
   return result.rows[0];
 }

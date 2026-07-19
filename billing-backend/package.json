@@ -21,7 +21,9 @@
     "verify:trips-lifecycle": "bash scripts/verify-trip-sheet-lifecycle.sh",
     "verify:trips-list": "bash scripts/verify-trip-sheet-list.sh",
     "verify:trips-perf": "bash scripts/verify-performance-sheet.sh",
-    "verify:error-handler": "bash scripts/verify-error-handler.sh"
+    "verify:error-handler": "bash scripts/verify-error-handler.sh",
+    "test:gst": "node scripts/test-gst-calc.js",
+    "verify:invoices-draft": "bash scripts/verify-invoice-draft.sh"
   },
   "keywords": [],
   "author": "",
