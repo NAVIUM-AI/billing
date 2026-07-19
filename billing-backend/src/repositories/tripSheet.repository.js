@@ -716,6 +716,65 @@ async function listPerformanceRows(
   };
 }
 
+/**
+ * Task 4.1: trips eligible to be added to an invoice — FINALIZED and
+ * either unheld or already held by the SAME draft being edited.
+ * `excludeInvoiceId` lets PATCH re-fetch a draft's own currently-held
+ * trips alongside newly-requested ones (pass null on initial create,
+ * when no invoice exists yet to exempt).
+ *
+ * @param {string} tenantId
+ * @param {string[]} tripIds
+ * @param {?string} excludeInvoiceId
+ * @param {import('pg').PoolClient} client
+ * @returns {Promise<object[]>}
+ */
+async function findFinalizedAndUnheld(tenantId, tripIds, excludeInvoiceId, client) {
+  const result = await client.query(
+    `SELECT * FROM trip_sheets
+     WHERE tenant_id = $1::uuid
+       AND id = ANY($2::uuid[])
+       AND status = 'FINALIZED'::trip_status_enum
+       AND (held_by_invoice_id IS NULL OR held_by_invoice_id = $3::uuid)`,
+    [tenantId, tripIds, excludeInvoiceId || null],
+  );
+  return result.rows;
+}
+
+/**
+ * @param {string} tenantId
+ * @param {string[]} tripIds
+ * @param {string} invoiceId
+ * @param {import('pg').PoolClient} client
+ * @returns {Promise<void>}
+ */
+async function setHold(tenantId, tripIds, invoiceId, client) {
+  await client.query(
+    `UPDATE trip_sheets
+     SET held_by_invoice_id = $3::uuid
+     WHERE tenant_id = $1::uuid
+       AND id = ANY($2::uuid[])
+       AND status = 'FINALIZED'::trip_status_enum`,
+    [tenantId, tripIds, invoiceId],
+  );
+}
+
+/**
+ * @param {string} tenantId
+ * @param {string} invoiceId
+ * @param {import('pg').PoolClient} client
+ * @returns {Promise<void>}
+ */
+async function releaseHold(tenantId, invoiceId, client) {
+  await client.query(
+    `UPDATE trip_sheets
+     SET held_by_invoice_id = NULL
+     WHERE tenant_id = $1::uuid
+       AND held_by_invoice_id = $2::uuid`,
+    [tenantId, invoiceId],
+  );
+}
+
 module.exports = {
   insert,
   findById,
@@ -725,4 +784,7 @@ module.exports = {
   updateDraft,
   list,
   listPerformanceRows,
+  findFinalizedAndUnheld,
+  setHold,
+  releaseHold,
 };
