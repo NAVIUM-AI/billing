@@ -2,9 +2,9 @@
  * Invoice routes, scoped to the current tenant. Thin by design —
  * validation lives in invoice.validator.js, business logic in
  * invoice.service.js. Task 4.1 ships DRAFT creation + full CRUD on
- * drafts only; there is deliberately no issue/cancel route yet — those
- * are Task 4.3, once invoice numbering and immutability snapshots
- * exist.
+ * drafts; Task 4.2 adds per-line description editing. There is
+ * deliberately no issue/cancel route yet — those are Task 4.3, once
+ * invoice numbering and immutability snapshots exist.
  */
 
 const express = require("express");
@@ -17,6 +17,8 @@ const {
   createInvoiceSchema,
   updateInvoiceSchema,
   invoiceIdParamSchema,
+  invoiceLineParamSchema,
+  updateLineSchema,
 } = require("../../validators/invoice.validator");
 const invoiceService = require("../../services/invoice.service");
 
@@ -67,6 +69,24 @@ router.delete(
   validate(invoiceIdParamSchema, "params"),
   async (req, res) => {
     const result = await invoiceService.deleteDraftInvoice(req.tenantId, req.params.invoiceId, req.user.userId, req.db);
+    res.json(result);
+  },
+);
+
+router.patch(
+  "/:invoiceId/lines/:lineId",
+  requirePermission("invoices:draft"),
+  validate(invoiceLineParamSchema, "params"),
+  validate(updateLineSchema, "body"),
+  async (req, res) => {
+    const result = await invoiceService.updateInvoiceLine(
+      req.tenantId,
+      req.params.invoiceId,
+      req.params.lineId,
+      req.body,
+      req.user.userId,
+      req.db,
+    );
     res.json(result);
   },
 );

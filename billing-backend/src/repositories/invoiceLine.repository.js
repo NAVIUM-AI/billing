@@ -100,4 +100,68 @@ async function listByInvoice(tenantId, invoiceId, client) {
   return result.rows;
 }
 
-module.exports = { insertBatch, deleteByInvoice, listByInvoice };
+/**
+ * @param {string} tenantId
+ * @param {string} invoiceId
+ * @param {string} lineId
+ * @param {import('pg').PoolClient} client
+ * @returns {Promise<object|null>}
+ */
+async function findById(tenantId, invoiceId, lineId, client) {
+  const result = await client.query(
+    "SELECT * FROM invoice_lines WHERE tenant_id = $1 AND invoice_id = $2 AND id = $3",
+    [tenantId, invoiceId, lineId],
+  );
+  return result.rows[0] || null;
+}
+
+// Just description for now (Task 4.2) — line_amount and every
+// trip-derived field are intentionally NOT here, since they're
+// snapshotted from the trip at line-creation time, not user-editable.
+const LINE_UPDATABLE_COLUMNS = ["description"];
+
+/**
+ * Guarded by an EXISTS check that the parent invoice is still DRAFT —
+ * belt-and-suspenders on top of the service's own pre-check
+ * (findByIdForUpdate + status check), same "guard in the WHERE" pattern
+ * as invoice.repository.js#updateDraft. The EXISTS subquery correlates
+ * via the bound $1/$2 params rather than by referencing
+ * invoice_lines.tenant_id/invoice_id unqualified inside the subquery —
+ * an unqualified column name there would resolve against the
+ * subquery's OWN `invoices i` table (which also has tenant_id/id
+ * columns), silently turning the guard into an always-true tautology
+ * instead of an actual cross-table check.
+ *
+ * @param {string} tenantId
+ * @param {string} invoiceId
+ * @param {string} lineId
+ * @param {Record<string, unknown>} patch
+ * @param {import('pg').PoolClient} client
+ * @returns {Promise<object|null>}
+ */
+async function updateLine(tenantId, invoiceId, lineId, patch, client) {
+  const keys = Object.keys(patch).filter((key) => LINE_UPDATABLE_COLUMNS.includes(key));
+  if (keys.length === 0) {
+    throw apiError(400, "EMPTY_PATCH", "No valid fields to update.");
+  }
+
+  // $1 = tenantId, $2 = invoiceId, $3 = lineId, so column placeholders start at $4.
+  const setClause = keys.map((key, i) => `${key} = $${i + 4}`).join(", ");
+  const values = keys.map((key) => patch[key]);
+
+  const result = await client.query(
+    `UPDATE invoice_lines SET ${setClause}
+     WHERE tenant_id = $1 AND invoice_id = $2 AND id = $3
+       AND EXISTS (
+         SELECT 1 FROM invoices i
+         WHERE i.id = $2
+           AND i.tenant_id = $1
+           AND i.status = 'DRAFT'::invoice_status_enum
+       )
+     RETURNING *`,
+    [tenantId, invoiceId, lineId, ...values],
+  );
+  return result.rows[0] || null;
+}
+
+module.exports = { insertBatch, deleteByInvoice, listByInvoice, findById, updateLine };
