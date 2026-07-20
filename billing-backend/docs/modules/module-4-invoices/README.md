@@ -1,6 +1,33 @@
 # Module 4: Invoicing & GST
 
-_Status: in progress. Task 4.1 (invoice foundation, GST domain, draft CRUD, trip hold), Task 4.2 (invoiceable trips picker, reimbursement auto-sum, line description editing), and Task 4.3 (invoice lifecycle, numbering, immutability, credit-note cancellation) are complete. Full module documentation (mirroring Module 2/3's structure) lands after Task 4.6._
+_Status: in progress. Task 4.1 (invoice foundation, GST domain, draft CRUD, trip hold), Task 4.2 (invoiceable trips picker, reimbursement auto-sum, line description editing), Task 4.3 (invoice lifecycle, numbering, immutability, credit-note cancellation), and Task 4.4 (payments ledger, PAID transition, customer statement, aging report) are complete. Full module documentation (mirroring Module 2/3's structure) lands after Task 4.6._
+
+## Task 4.4: Payments ledger + PAID transition + customer statement + aging report
+
+Status: Complete.
+
+**Payments** (`payments` table, Task 4.4 migration): lifecycle is RECORDED → CANCELLED (terminal — cancellation is the only reversal path, there is no DELETE). A payment either applies to a specific invoice (`invoice_id` set) or sits as an unallocated advance on the customer (`invoice_id` null). Modes: CASH, UPI, NEFT, RTGS, IMPS, CHEQUE, CARD, BANK_TRANSFER. CASH payments carry no reference; every other mode requires one, enforced at both the DB (`payments_reference_required` CHECK) and Joi layers. Idempotency: a unique index on `(tenant_id, payment_mode, reference_number)` scoped to non-CASH, RECORDED rows stops the same NEFT UTR / UPI txn ID from being recorded twice — but a cancelled payment's reference is free to reuse, since it's no longer "active."
+
+**Endpoints**:
+- `POST /invoices/:id/payments` — record a payment against a specific invoice
+- `POST /customers/:id/advances` — standalone advance, not tied to any invoice
+- `POST /invoices/:id/apply-advance` — apply an existing unallocated advance to an invoice
+- `POST /payments/:id/cancel` — the only way to reverse a payment
+- `GET /payments`, `GET /payments/:id` — list/read
+- `GET /customers/:id/ledger` — full statement (every non-DRAFT invoice + every RECORDED payment, merged into one running-balance timeline)
+- `GET /reports/receivables-aging` — outstanding ISSUED invoices bucketed by days overdue (CURRENT, 1-30, 31-60, 61-90, 90+)
+
+**Derived transitions** (`src/domain/invoiceLifecycle/`): ISSUED → PAID fires automatically once cumulative RECORDED payments reach `net_payable_paise`; PAID → ISSUED is the mirror-image reversal, firing automatically when cancelling a payment drops the cumulative total back below `net_payable_paise`. Both are first-class entries in the state machine's own `TRANSITIONS` map, not a special case bolted onto `payment.service.js` — same "the state machine encodes every legal transition, regardless of trigger" principle the trip lifecycle module already followed for its own derived transitions.
+
+**Over-payment behavior**: paying more than an invoice's outstanding balance splits the payment — the outstanding amount applies to the invoice, the excess spills into a new unallocated advance on the same customer, linked back via `parent_payment_id` for audit. The spillover's reference number gets a `#advance-of-{id}` suffix so it doesn't collide with the idempotency index on the (already-recorded) applied portion.
+
+**Advance application**: applying an advance either fully consumes it (the row is reassigned to point at the invoice — no new row) or partially consumes it (a new applied-portion row is inserted, referencing the advance via `parent_payment_id`, and the advance row's own `amount_paise` is decremented in place).
+
+**Two bugs found in the spec's own pseudocode and fixed in this commit** (both documented at the top of `payment.service.js`):
+1. Recording a payment on an invoice with zero (or negative) outstanding — legal, since payments are allowed on already-PAID invoices too — would, under the spec's literal split formula, try to insert an "applied" row with `amount_paise <= 0`, violating `payments`' own `amount_paise > 0` CHECK. Fixed: when outstanding is already `<= 0`, the entire payment becomes a pure advance instead.
+2. The spec's partial-advance-application reference (`applied-from-advance-{advance.id}`) is stable across repeated partial applications of the same advance to different invoices, so a second partial application of a non-CASH advance would collide with the idempotency index. Fixed by including the target invoice id in the reference.
+
+Full Module 4 docs after Task 4.6.
 
 ## Task 4.3: Invoice lifecycle + numbering + credit-note cancellation
 

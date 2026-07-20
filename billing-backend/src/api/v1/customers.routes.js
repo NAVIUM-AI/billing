@@ -22,8 +22,10 @@ const {
   customerContactParamSchema,
 } = require("../../validators/customer.validator");
 const { invoiceableTripsQuerySchema } = require("../../validators/invoice.validator");
+const { recordPaymentSchema } = require("../../validators/payment.validator");
 const customerService = require("../../services/customer.service");
 const invoiceService = require("../../services/invoice.service");
+const paymentService = require("../../services/payment.service");
 
 const router = express.Router();
 
@@ -183,6 +185,37 @@ router.get(
       req.db,
     );
     res.json(data);
+  },
+);
+
+// Task 4.4: standalone customer advance (not tied to any invoice yet).
+router.post(
+  "/:customerId/advances",
+  requirePermission("payments:record"),
+  validate(customerIdParamSchema, "params"),
+  validate(recordPaymentSchema, "body"),
+  async (req, res) => {
+    const payment = await paymentService.recordAdvanceForCustomer(
+      req.tenantId,
+      req.params.customerId,
+      req.body,
+      req.user.userId,
+      req.db,
+    );
+    res.status(201).json({ payment });
+  },
+);
+
+// Task 4.4: full statement — every non-DRAFT invoice and every
+// RECORDED payment for this customer, merged into one running-balance
+// timeline.
+router.get(
+  "/:customerId/ledger",
+  requirePermission("payments:read"),
+  validate(customerIdParamSchema, "params"),
+  async (req, res) => {
+    const result = await paymentService.getCustomerLedger(req.tenantId, req.params.customerId, req.db);
+    res.json(result);
   },
 );
 
