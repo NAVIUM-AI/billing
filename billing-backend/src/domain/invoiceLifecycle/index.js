@@ -8,13 +8,19 @@
  *                invoice was never legally issued)
  *
  * ISSUED can:
- *   → PAID      (derived from payments — Task 4.4 wires the trigger;
- *                no code path exercises this transition yet)
+ *   → PAID      (derived, Task 4.4: automatic when cumulative RECORDED
+ *                payments reach net_payable_paise)
  *   → CANCELLED (via POST /invoices/:id/cancel — issues a credit note)
  *
  * PAID can:
  *   → CANCELLED (via POST /invoices/:id/cancel — issues a credit note;
  *                the refund itself is handled outside this system)
+ *   → ISSUED    (derived, Task 4.4: automatic when a payment
+ *                cancellation drops cumulative RECORDED payments back
+ *                below net_payable_paise — the mirror image of the
+ *                ISSUED → PAID trigger, so it belongs in the same
+ *                state machine as a first-class transition rather than
+ *                as a special case bolted onto payment.service.js)
  *
  * CANCELLED is terminal.
  */
@@ -22,7 +28,7 @@
 const TRANSITIONS = Object.freeze({
   DRAFT: new Set(["ISSUED", "CANCELLED"]),
   ISSUED: new Set(["PAID", "CANCELLED"]),
-  PAID: new Set(["CANCELLED"]),
+  PAID: new Set(["CANCELLED", "ISSUED"]),
   CANCELLED: new Set([]),
 });
 

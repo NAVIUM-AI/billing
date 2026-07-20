@@ -52,7 +52,16 @@ module.exports = Object.freeze({
   "invoices:draft": ["owner", "admin", "accountant", "staff"],
   "invoices:issue": ["owner", "admin", "accountant"],
   "invoices:cancel": ["owner", "admin"],
-  "payments:read": ["owner", "admin", "accountant", "viewer"],
-  "payments:record": ["owner", "admin", "accountant"],
-  "reports:read": ["owner", "admin", "accountant", "viewer"],
+  // Record includes staff (Task 4.4) — same reasoning as
+  // invoices:draft: staff take payments at the front desk. Cancel is
+  // narrower (no staff) since reversing a recorded payment is a
+  // higher-privilege correction, same relationship as trips:write vs
+  // trips:cancel.
+  "payments:record": ["owner", "admin", "accountant", "staff"],
+  "payments:cancel": ["owner", "admin", "accountant"],
+  "payments:read": ["owner", "admin", "accountant", "staff", "viewer"],
+  // Narrower than the pre-Task-4.4 placeholder (no staff, no viewer,
+  // per the Task 4.4 spec) — receivables/aging data is financial
+  // reporting, not an operational read like trips:read or payments:read.
+  "reports:read": ["owner", "admin", "accountant"],
 });

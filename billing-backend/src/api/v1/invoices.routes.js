@@ -3,7 +3,8 @@
  * validation lives in invoice.validator.js, business logic in
  * invoice.service.js. Task 4.1 ships DRAFT creation + full CRUD on
  * drafts; Task 4.2 adds per-line description editing; Task 4.3 adds
- * the issue/cancel lifecycle transitions.
+ * the issue/cancel lifecycle transitions; Task 4.4 adds recording
+ * payments and applying advances against a specific invoice.
  */
 
 const express = require("express");
@@ -21,7 +22,9 @@ const {
   issueInvoiceSchema,
   cancelInvoiceSchema,
 } = require("../../validators/invoice.validator");
+const { recordPaymentSchema, applyAdvanceSchema } = require("../../validators/payment.validator");
 const invoiceService = require("../../services/invoice.service");
+const paymentService = require("../../services/payment.service");
 
 const router = express.Router();
 
@@ -92,6 +95,40 @@ router.post(
   validate(cancelInvoiceSchema, "body"),
   async (req, res) => {
     const result = await invoiceService.cancelInvoice(
+      req.tenantId,
+      req.params.invoiceId,
+      req.body,
+      req.user.userId,
+      req.db,
+    );
+    res.json(result);
+  },
+);
+
+router.post(
+  "/:invoiceId/payments",
+  requirePermission("payments:record"),
+  validate(invoiceIdParamSchema, "params"),
+  validate(recordPaymentSchema, "body"),
+  async (req, res) => {
+    const result = await paymentService.recordPaymentOnInvoice(
+      req.tenantId,
+      req.params.invoiceId,
+      req.body,
+      req.user.userId,
+      req.db,
+    );
+    res.status(201).json(result);
+  },
+);
+
+router.post(
+  "/:invoiceId/apply-advance",
+  requirePermission("payments:record"),
+  validate(invoiceIdParamSchema, "params"),
+  validate(applyAdvanceSchema, "body"),
+  async (req, res) => {
+    const result = await paymentService.applyAdvanceToInvoice(
       req.tenantId,
       req.params.invoiceId,
       req.body,
