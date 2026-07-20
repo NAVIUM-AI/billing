@@ -40,12 +40,17 @@
 
 const { computeGST, computeRoundOff, isSameState, DomainInputError } = require("../domain/gst");
 const { amountInWords } = require("../domain/gst/amountInWords");
+const { isValidTransition, allowedTransitions } = require("../domain/invoiceLifecycle");
 const { rupeesToPaise } = require("../utils/money");
+const { allocateInvoiceNumber, allocateCreditNoteNumber } = require("../utils/invoiceNumber");
+const { buildTenantSnapshot, buildCustomerSnapshot } = require("../utils/invoiceSnapshot");
 const invoiceRepo = require("../repositories/invoice.repository");
 const lineRepo = require("../repositories/invoiceLine.repository");
 const tripRepo = require("../repositories/tripSheet.repository");
 const customerRepo = require("../repositories/customer.repository");
 const tenantRepo = require("../repositories/tenant.repository");
+const creditNoteRepo = require("../repositories/creditNote.repository");
+const tripService = require("./tripSheet.service");
 const { apiError } = require("../utils/httpError");
 
 const HSN_SAC_VEHICLE_RENTAL = "996601";
@@ -746,6 +751,283 @@ async function updateInvoiceLine(tenantId, invoiceId, lineId, patch, actorUserId
   });
 }
 
+/**
+ * Guard used by both issueInvoice and cancelInvoice — same shape as
+ * tripSheet.service.js#assertTransition, just against the invoice
+ * state machine instead of the trip one.
+ *
+ * @param {{ status: string }} invoice
+ * @param {string} toStatus
+ */
+function assertInvoiceTransition(invoice, toStatus) {
+  if (!isValidTransition(invoice.status, toStatus)) {
+    throw apiError(
+      409,
+      "INVALID_INVOICE_STATE_TRANSITION",
+      `Invoice in status '${invoice.status}' cannot transition to '${toStatus}'.`,
+      {
+        current_status: invoice.status,
+        requested_status: toStatus,
+        allowed_transitions: allowedTransitions(invoice.status),
+      },
+    );
+  }
+}
+
+/**
+ * POST /invoices/:invoiceId/issue — DRAFT -> ISSUED. Allocates the
+ * legal invoice number atomically, freezes tenant/customer state into
+ * the invoice's snapshot columns, and flips every trip on the invoice
+ * from FINALIZED to INVOICED — all inside one transaction, so a
+ * failure partway through (a stale trip status, a number collision)
+ * rolls back the number allocation and every trip transition together
+ * rather than leaving the system half-issued.
+ *
+ * @param {string} tenantId
+ * @param {string} id
+ * @param {string} actorUserId
+ * @param {{ withTenantContext: Function }} db
+ * @returns {Promise<object>}
+ */
+async function issueInvoice(tenantId, id, actorUserId, db) {
+  return db.withTenantContext(async (client) => {
+    const invoice = await invoiceRepo.findByIdForUpdate(tenantId, id, client);
+    if (!invoice) {
+      throw apiError(404, "INVOICE_NOT_FOUND", "Invoice not found.");
+    }
+
+    assertInvoiceTransition(invoice, "ISSUED");
+
+    // Both should always exist — an invoice's own tenant and its
+    // customer_id (FK, ON DELETE RESTRICT) can't disappear out from
+    // under it. If they somehow do, a 500 correctly signals a data
+    // integrity failure rather than a routine 404.
+    const tenant = await tenantRepo.findById(tenantId, client);
+    const customer = await customerRepo.findById(tenantId, invoice.customer_id, client);
+
+    const prefix = invoice.invoice_type === "TAX" ? tenant.invoice_prefix : tenant.performance_prefix;
+
+    const invoiceNumber = await allocateInvoiceNumber({
+      client,
+      tenantId,
+      invoiceType: invoice.invoice_type,
+      invoiceDate: invoice.invoice_date,
+      prefix,
+    });
+
+    const tenantSnapshot = buildTenantSnapshot(tenant);
+    const customerSnapshot = buildCustomerSnapshot(customer);
+
+    // Recomputed here (not just trusted from DRAFT) in case some edit
+    // path changed net_payable_paise without refreshing the words —
+    // cheap insurance, safe to overwrite either way.
+    const amountWords = amountInWords(invoice.net_payable_paise);
+
+    const issued = await invoiceRepo.transitionStatus(
+      tenantId,
+      id,
+      invoice.status,
+      "ISSUED",
+      { issuedAt: new Date(), issuedBy: actorUserId },
+      { tenantSnapshot, customerSnapshot },
+      invoiceNumber,
+      client,
+    );
+    if (!issued) {
+      // Shouldn't happen — findByIdForUpdate holds the row lock for
+      // this whole transaction — but defensive, same pattern as every
+      // other guarded transition in this file.
+      throw apiError(409, "INVOICE_STATUS_CHANGED", "Invoice status changed during issue. Reload and retry.", {
+        invoice_id: id,
+      });
+    }
+
+    // transitionStatus's own column list doesn't include
+    // amount_in_words (see its comment) — write it separately.
+    await client.query("UPDATE invoices SET amount_in_words = $1 WHERE id = $2::uuid AND tenant_id = $3::uuid", [
+      amountWords,
+      id,
+      tenantId,
+    ]);
+
+    const tripIds = (await lineRepo.listByInvoice(tenantId, id, client)).map((l) => l.trip_sheet_id);
+    await tripService.markTripsInvoiced(tenantId, tripIds, id, actorUserId, client);
+    // No longer needed once every trip is INVOICED — the hold's job
+    // was only to prevent double-booking a trip across two DRAFTS.
+    await tripRepo.releaseHold(tenantId, id, client);
+
+    const finalInvoice = await invoiceRepo.findById(tenantId, id, client);
+    const lines = await lineRepo.listByInvoice(tenantId, id, client);
+    return { ...finalInvoice, lines };
+  });
+}
+
+/**
+ * POST /invoices/:invoiceId/cancel. Two shapes depending on where the
+ * invoice was in its lifecycle:
+ *   - DRAFT: a plain status flip + trip-hold release. No credit note —
+ *     the invoice was never legally issued, so there's nothing to
+ *     reverse for GST purposes.
+ *   - ISSUED/PAID: a legal cancellation. Issues a credit note (its own
+ *     gap-free number, its own tenant/customer snapshot as of NOW,
+ *     mirroring the invoice's frozen totals as the reversal amount),
+ *     flips the invoice to CANCELLED, and reverses every trip on it
+ *     back to FINALIZED (re-invoiceable) — all in one transaction.
+ *
+ * @param {string} tenantId
+ * @param {string} id
+ * @param {{ reason: string }} input - validated cancelInvoiceSchema output
+ * @param {string} actorUserId
+ * @param {{ withTenantContext: Function }} db
+ * @returns {Promise<{ invoice: object, credit_note: ?object }>}
+ */
+async function cancelInvoice(tenantId, id, { reason }, actorUserId, db) {
+  // Step 1: Normalize.
+  const trimmedReason = reason.trim();
+
+  return db.withTenantContext(async (client) => {
+    const invoice = await invoiceRepo.findByIdForUpdate(tenantId, id, client);
+    if (!invoice) {
+      throw apiError(404, "INVOICE_NOT_FOUND", "Invoice not found.");
+    }
+
+    assertInvoiceTransition(invoice, "CANCELLED");
+
+    if (invoice.status === "DRAFT") {
+      await tripRepo.releaseHold(tenantId, invoice.id, client);
+
+      const cancelled = await invoiceRepo.transitionStatus(
+        tenantId,
+        id,
+        "DRAFT",
+        "CANCELLED",
+        { cancelledAt: new Date(), cancelledBy: actorUserId, cancellationReason: trimmedReason },
+        null,
+        null,
+        client,
+      );
+      if (!cancelled) {
+        throw apiError(409, "INVOICE_STATUS_CHANGED", "Invoice status changed during cancel. Reload and retry.", {
+          invoice_id: id,
+        });
+      }
+
+      return { invoice: cancelled, credit_note: null };
+    }
+
+    // ISSUED or PAID: legal cancellation via credit note.
+    const tenant = await tenantRepo.findById(tenantId, client);
+    const customer = await customerRepo.findById(tenantId, invoice.customer_id, client);
+
+    // A plain ISO date string, not a raw Date — every other calendar
+    // date in this codebase (invoice_date, trip_date, ...) is handled
+    // as 'YYYY-MM-DD' specifically to sidestep the local-midnight/
+    // UTC-midnight shift documented repeatedly elsewhere (Task 2.2);
+    // invoiceNumber.js#allocateCreditNoteNumber expects that same shape.
+    const creditNoteDateStr = new Date().toISOString().slice(0, 10);
+
+    const cnNumber = await allocateCreditNoteNumber({
+      client,
+      tenantId,
+      creditNoteDate: creditNoteDateStr,
+      prefix: tenant.credit_note_prefix,
+    });
+
+    const cnAmountWords = amountInWords(invoice.net_payable_paise);
+
+    const creditNote = await creditNoteRepo.insert(
+      tenantId,
+      {
+        creditNoteNumber: cnNumber,
+        originalInvoiceId: invoice.id,
+        customerId: invoice.customer_id,
+        customerSnapshot: buildCustomerSnapshot(customer),
+        tenantSnapshot: buildTenantSnapshot(tenant),
+        subtotalPaise: invoice.subtotal_paise,
+        totalGstPaise: invoice.total_gst_paise,
+        cgstPaise: invoice.cgst_paise,
+        sgstPaise: invoice.sgst_paise,
+        igstPaise: invoice.igst_paise,
+        tollPaise: invoice.toll_paise,
+        parkingPaise: invoice.parking_paise,
+        permitPaise: invoice.permit_paise,
+        fasttagPaise: invoice.fasttag_paise,
+        discountPaise: invoice.discount_paise,
+        grandTotalPaise: invoice.grand_total_paise,
+        netPayablePaise: invoice.net_payable_paise,
+        creditNoteDate: creditNoteDateStr,
+        reason: trimmedReason,
+        amountInWords: cnAmountWords,
+        issuedBy: actorUserId,
+      },
+      client,
+    );
+
+    const cancelled = await invoiceRepo.transitionStatus(
+      tenantId,
+      id,
+      invoice.status,
+      "CANCELLED",
+      {
+        cancelledAt: new Date(),
+        cancelledBy: actorUserId,
+        cancellationReason: trimmedReason,
+        creditNoteId: creditNote.id,
+      },
+      null,
+      null,
+      client,
+    );
+    if (!cancelled) {
+      throw apiError(409, "INVOICE_STATUS_CHANGED", "Invoice status changed during cancel. Reload and retry.", {
+        invoice_id: id,
+      });
+    }
+
+    const tripIds = (await lineRepo.listByInvoice(tenantId, id, client)).map((l) => l.trip_sheet_id);
+    await tripService.reverseTripInvoiced(tenantId, tripIds, actorUserId, client);
+
+    return { invoice: cancelled, credit_note: creditNote };
+  });
+}
+
+/**
+ * @param {string} tenantId
+ * @param {string} id
+ * @param {{ withTenantContext: Function }} db
+ * @returns {Promise<{ credit_note: object }>}
+ */
+async function getCreditNote(tenantId, id, db) {
+  const creditNote = await db.withTenantContext(async (client) => creditNoteRepo.findById(tenantId, id, client));
+  if (!creditNote) {
+    throw apiError(404, "CREDIT_NOTE_NOT_FOUND", "Credit note not found.");
+  }
+  return { credit_note: creditNote };
+}
+
+/**
+ * @param {string} tenantId
+ * @param {{ limit?: number, offset?: number }} query
+ * @param {{ withTenantContext: Function }} db
+ * @returns {Promise<{ credit_notes: object[], pagination: object }>}
+ */
+async function listCreditNotes(tenantId, query, db) {
+  const limit = query.limit ?? 25;
+  const offset = query.offset ?? 0;
+
+  const result = await db.withTenantContext(async (client) => creditNoteRepo.list(tenantId, { limit, offset }, client));
+
+  return {
+    credit_notes: result.rows,
+    pagination: {
+      total: result.total,
+      limit,
+      offset,
+      has_more: offset + result.rows.length < result.total,
+    },
+  };
+}
+
 module.exports = {
   createDraftInvoice,
   getInvoice,
@@ -753,4 +1035,8 @@ module.exports = {
   deleteDraftInvoice,
   getInvoiceableTripsForCustomer,
   updateInvoiceLine,
+  issueInvoice,
+  cancelInvoice,
+  getCreditNote,
+  listCreditNotes,
 };

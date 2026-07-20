@@ -729,28 +729,31 @@ async function cancelTripSheet(tenantId, id, { reason }, actorUserId, db) {
 }
 
 /**
- * Reserved for Module 4. Not exposed as an API endpoint. Module 4's
- * invoice-issue flow calls this from within its own transaction,
- * passing the same client (i.e. it should thread its own `client`
- * through rather than opening a second `withTenantContext`, once that
- * integration is built) so the trip's INVOICED transition and the
- * invoice row's creation commit or roll back together.
+ * Task 4.3: Module 4's invoice-issue flow calls this from WITHIN its
+ * own transaction, threading its own `client` through rather than
+ * opening a second `withTenantContext` — this is the fix the Task 3.3
+ * stub this function replaces (`markTripInvoiced`, `db`-based, never
+ * exposed as an API endpoint) had already flagged as needed once the
+ * integration was actually built: an invoice's status change and its
+ * trips' FINALIZED -> INVOICED transitions must commit or roll back
+ * together as one unit, which is only possible if they share a
+ * connection/transaction. `client` is REQUIRED, never defaulted.
  *
  * @param {string} tenantId
- * @param {string} id
+ * @param {string[]} tripIds
  * @param {string} invoiceId
- * @param {string} actorUserId - unused today; kept in the signature so
- *   Module 4 doesn't have to change this function's shape to thread an
- *   actor through once invoice-issue audit logging exists.
- * @param {{ withTenantContext: Function }} db
- * @returns {Promise<object>}
+ * @param {string} actorUserId - unused today; kept in the signature in
+ *   case invoice-issue audit logging is added later.
+ * @param {import('pg').PoolClient} client
+ * @returns {Promise<object[]>}
  */
 // eslint-disable-next-line no-unused-vars
-async function markTripInvoiced(tenantId, id, invoiceId, actorUserId, db) {
-  return db.withTenantContext(async (client) => {
+async function markTripsInvoiced(tenantId, tripIds, invoiceId, actorUserId, client) {
+  const updatedTrips = [];
+  for (const id of tripIds) {
     const trip = await tripRepo.findByIdForUpdate(tenantId, id, client);
     if (!trip) {
-      throw apiError(404, "TRIP_NOT_FOUND", "Trip sheet not found.");
+      throw apiError(404, "TRIP_NOT_FOUND", "Trip sheet not found.", { trip_id: id });
     }
 
     assertTransition(trip, "INVOICED");
@@ -766,8 +769,46 @@ async function markTripInvoiced(tenantId, id, invoiceId, actorUserId, db) {
     if (!updated) {
       throw apiError(409, "TRIP_STATUS_CHANGED", "Trip status changed. Reload and retry.", { trip_id: id });
     }
-    return updated;
-  });
+    updatedTrips.push(updated);
+  }
+  return updatedTrips;
+}
+
+/**
+ * Task 4.3: reverses markTripsInvoiced — INVOICED back to FINALIZED,
+ * called from invoice.service.js#cancelInvoice when reversing an
+ * ISSUED/PAID invoice's trips back to a re-invoiceable state. Same
+ * client-threading discipline as markTripsInvoiced (required, caller's
+ * own transaction). Uses tripRepo.reverseInvoiced rather than
+ * transitionStatus, since transitionStatus's invoiced_at/invoice_id
+ * columns are COALESCE-based and can only ADD a value, never clear one
+ * — see that repo function's own comment.
+ *
+ * @param {string} tenantId
+ * @param {string[]} tripIds
+ * @param {string} actorUserId - unused today; kept in the signature in
+ *   case invoice-cancel audit logging is added later.
+ * @param {import('pg').PoolClient} client
+ * @returns {Promise<object[]>}
+ */
+// eslint-disable-next-line no-unused-vars
+async function reverseTripInvoiced(tenantId, tripIds, actorUserId, client) {
+  const updatedTrips = [];
+  for (const id of tripIds) {
+    const trip = await tripRepo.findByIdForUpdate(tenantId, id, client);
+    if (!trip) {
+      throw apiError(404, "TRIP_NOT_FOUND", "Trip sheet not found.", { trip_id: id });
+    }
+
+    assertTransition(trip, "FINALIZED");
+
+    const updated = await tripRepo.reverseInvoiced(tenantId, id, client);
+    if (!updated) {
+      throw apiError(409, "TRIP_STATUS_CHANGED", "Trip status changed. Reload and retry.", { trip_id: id });
+    }
+    updatedTrips.push(updated);
+  }
+  return updatedTrips;
 }
 
 /**
@@ -855,6 +896,7 @@ module.exports = {
   updateTripSheet,
   finalizeTripSheet,
   cancelTripSheet,
-  markTripInvoiced,
+  markTripsInvoiced,
+  reverseTripInvoiced,
   listTrips,
 };

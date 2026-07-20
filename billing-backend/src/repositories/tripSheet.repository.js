@@ -339,6 +339,39 @@ async function transitionStatus(tenantId, id, fromStatus, toStatus, auditFields,
 }
 
 /**
+ * Task 4.3: reverses an invoice-issue trip transition — INVOICED back
+ * to FINALIZED, on invoice cancellation. Deliberately NOT built on top
+ * of transitionStatus: that function's invoiced_at/invoice_id columns
+ * use COALESCE (`COALESCE($9::timestamptz, invoiced_at)`), which can
+ * only ever ADD a value, never CLEAR one back to null — passing null
+ * there is indistinguishable from "leave it alone". Reversal is the one
+ * case that genuinely needs to erase both fields, so it gets its own
+ * guarded statement rather than overloading transitionStatus's
+ * contract (and risking a regression in every other caller that
+ * correctly relies on COALESCE's "don't touch what you didn't pass"
+ * behavior).
+ *
+ * @param {string} tenantId
+ * @param {string} id
+ * @param {import('pg').PoolClient} client
+ * @returns {Promise<object|null>}
+ */
+async function reverseInvoiced(tenantId, id, client) {
+  const result = await client.query(
+    `UPDATE trip_sheets
+     SET status = 'FINALIZED'::trip_status_enum,
+         invoiced_at = NULL,
+         invoice_id = NULL
+     WHERE id = $1::uuid
+       AND tenant_id = $2::uuid
+       AND status = 'INVOICED'::trip_status_enum
+     RETURNING *`,
+    [id, tenantId],
+  );
+  return result.rows[0] || null;
+}
+
+/**
  * Updates only the whitelisted, present keys of `patch`, guarded by
  * `status = 'DRAFT'` in the WHERE — the same "guard in the WHERE, not
  * a separate check" pattern as transitionStatus above. A `null`
@@ -861,4 +894,5 @@ module.exports = {
   releaseHold,
   findInvoiceableForCustomer,
   summarizeReimbursements,
+  reverseInvoiced,
 };

@@ -87,20 +87,28 @@ async function updateProfile(tenantId, patch, client) {
 }
 
 /**
- * @param {{ name: string, slug: string, gstin?: string, stateCode?: string, invoicePrefix?: string, performancePrefix?: string }} params
+ * @param {{ name: string, slug: string, gstin?: string, stateCode?: string, invoicePrefix?: string, performancePrefix?: string, creditNotePrefix?: string }} params
  * @param {import('pg').PoolClient} [client]
  * @returns {Promise<object>} the newly created tenant row
  */
 async function insertTenant(
-  { name, slug, gstin, stateCode, invoicePrefix, performancePrefix },
+  { name, slug, gstin, stateCode, invoicePrefix, performancePrefix, creditNotePrefix },
   client,
 ) {
   const runner = client || pool;
   const result = await runner.query(
-    `INSERT INTO tenants (name, slug, gstin, state_code, invoice_prefix, performance_prefix)
-     VALUES ($1, $2, $3, $4, COALESCE($5, 'INV'), COALESCE($6, 'INV-PS'))
+    `INSERT INTO tenants (name, slug, gstin, state_code, invoice_prefix, performance_prefix, credit_note_prefix)
+     VALUES ($1, $2, $3, $4, COALESCE($5, 'INV'), COALESCE($6, 'INV-PS'), COALESCE($7, 'CN'))
      RETURNING *`,
-    [name, slug, gstin || null, stateCode || null, invoicePrefix || null, performancePrefix || null],
+    [
+      name,
+      slug,
+      gstin || null,
+      stateCode || null,
+      invoicePrefix || null,
+      performancePrefix || null,
+      creditNotePrefix || null,
+    ],
   );
   return result.rows[0];
 }

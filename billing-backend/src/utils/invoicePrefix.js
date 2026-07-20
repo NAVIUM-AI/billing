@@ -29,4 +29,16 @@ function derivePerformancePrefix(basePrefix) {
   return `${basePrefix}-PS`;
 }
 
-module.exports = { deriveInvoicePrefix, derivePerformancePrefix };
+/**
+ * Task 4.3: mirrors the credit_notes migration's own backfill CASE —
+ * 'INV' (the fallback prefix, not a real business-derived one) maps to
+ * plain 'CN' rather than the slightly odd 'INV-CN'.
+ *
+ * @param {string} basePrefix
+ * @returns {string}
+ */
+function deriveCreditNotePrefix(basePrefix) {
+  return basePrefix === "INV" ? "CN" : `${basePrefix}-CN`;
+}
+
+module.exports = { deriveInvoicePrefix, derivePerformancePrefix, deriveCreditNotePrefix };

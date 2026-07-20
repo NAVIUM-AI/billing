@@ -2,9 +2,8 @@
  * Invoice routes, scoped to the current tenant. Thin by design —
  * validation lives in invoice.validator.js, business logic in
  * invoice.service.js. Task 4.1 ships DRAFT creation + full CRUD on
- * drafts; Task 4.2 adds per-line description editing. There is
- * deliberately no issue/cancel route yet — those are Task 4.3, once
- * invoice numbering and immutability snapshots exist.
+ * drafts; Task 4.2 adds per-line description editing; Task 4.3 adds
+ * the issue/cancel lifecycle transitions.
  */
 
 const express = require("express");
@@ -19,6 +18,8 @@ const {
   invoiceIdParamSchema,
   invoiceLineParamSchema,
   updateLineSchema,
+  issueInvoiceSchema,
+  cancelInvoiceSchema,
 } = require("../../validators/invoice.validator");
 const invoiceService = require("../../services/invoice.service");
 
@@ -69,6 +70,34 @@ router.delete(
   validate(invoiceIdParamSchema, "params"),
   async (req, res) => {
     const result = await invoiceService.deleteDraftInvoice(req.tenantId, req.params.invoiceId, req.user.userId, req.db);
+    res.json(result);
+  },
+);
+
+router.post(
+  "/:invoiceId/issue",
+  requirePermission("invoices:issue"),
+  validate(invoiceIdParamSchema, "params"),
+  validate(issueInvoiceSchema, "body"),
+  async (req, res) => {
+    const invoice = await invoiceService.issueInvoice(req.tenantId, req.params.invoiceId, req.user.userId, req.db);
+    res.json({ invoice });
+  },
+);
+
+router.post(
+  "/:invoiceId/cancel",
+  requirePermission("invoices:cancel"),
+  validate(invoiceIdParamSchema, "params"),
+  validate(cancelInvoiceSchema, "body"),
+  async (req, res) => {
+    const result = await invoiceService.cancelInvoice(
+      req.tenantId,
+      req.params.invoiceId,
+      req.body,
+      req.user.userId,
+      req.db,
+    );
     res.json(result);
   },
 );

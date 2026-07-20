@@ -134,6 +134,19 @@ const updateLineSchema = Joi.object({
   .unknown(false)
   .min(1);
 
+// Task 4.3: POST /invoices/:invoiceId/issue. No required fields — the
+// body is optional/empty; `.unknown(false)` still rejects a stray key
+// if one is sent, rather than silently stripping it (Rule 6).
+const issueInvoiceSchema = Joi.object({}).unknown(false);
+
+// Task 4.3: POST /invoices/:invoiceId/cancel. Reason is mandatory for
+// BOTH the no-credit-note (DRAFT) and credit-note (ISSUED/PAID) paths —
+// same "no cancel-without-explanation" convention as
+// tripSheet.validator.js#cancelTripSchema.
+const cancelInvoiceSchema = Joi.object({
+  reason: Joi.string().trim().min(3).max(500).required(),
+}).unknown(false);
+
 module.exports = {
   INVOICE_TYPES,
   createInvoiceSchema,
@@ -142,4 +155,6 @@ module.exports = {
   invoiceLineParamSchema,
   invoiceableTripsQuerySchema,
   updateLineSchema,
+  issueInvoiceSchema,
+  cancelInvoiceSchema,
 };

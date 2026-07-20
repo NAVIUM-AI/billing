@@ -24,7 +24,8 @@
     "verify:error-handler": "bash scripts/verify-error-handler.sh",
     "test:gst": "node scripts/test-gst-calc.js",
     "verify:invoices-draft": "bash scripts/verify-invoice-draft.sh",
-    "verify:invoice-picker": "bash scripts/verify-invoice-picker.sh"
+    "verify:invoice-picker": "bash scripts/verify-invoice-picker.sh",
+    "verify:invoice-lifecycle": "bash scripts/verify-invoice-lifecycle.sh"
   },
   "keywords": [],
   "author": "",
