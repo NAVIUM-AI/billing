@@ -12,7 +12,7 @@ const userRepository = require("../repositories/user.repository");
 const refreshTokenRepository = require("../repositories/refreshToken.repository");
 const { hashPassword, verifyPassword } = require("../utils/password");
 const { slugify } = require("../utils/slugify");
-const { deriveInvoicePrefix, derivePerformancePrefix } = require("../utils/invoicePrefix");
+const { deriveInvoicePrefix, derivePerformancePrefix, deriveCreditNotePrefix } = require("../utils/invoicePrefix");
 const { apiError } = require("../utils/httpError");
 const {
   signAccessToken,
@@ -90,13 +90,14 @@ async function signup({
   // — both are editable afterward in settings.
   const invoicePrefix = deriveInvoicePrefix(businessName);
   const performancePrefix = derivePerformancePrefix(invoicePrefix);
+  const creditNotePrefix = deriveCreditNotePrefix(invoicePrefix);
 
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
 
     const tenant = await tenantRepository.insertTenant(
-      { name: businessName, slug, gstin, stateCode, invoicePrefix, performancePrefix },
+      { name: businessName, slug, gstin, stateCode, invoicePrefix, performancePrefix, creditNotePrefix },
       client,
     );
 
