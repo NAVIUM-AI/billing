@@ -12,9 +12,17 @@
  *   → INVOICED   (via Module 4 invoice-issue flow)
  *   → CANCELLED  (via /cancel — reversal case)
  *
- * INVOICED is currently terminal from this module's perspective. A
- * cancellation after invoicing requires an invoice-level reversal
- * (credit note) that Module 4 will implement.
+ * INVOICED can:
+ *   → FINALIZED  (Task 4.3: Module 4's invoice-cancel flow reverses
+ *                 this when an ISSUED/PAID invoice is cancelled via
+ *                 credit note — the trip becomes re-invoiceable. This
+ *                 module originally shipped (Task 3.3) treating
+ *                 INVOICED as terminal, on the assumption that the
+ *                 reversal would be "an invoice-level concern Module 4
+ *                 will implement" — it turned out to belong here
+ *                 instead, since the trip's OWN state machine is what
+ *                 decides which transitions are legal, invoice-level
+ *                 or not.)
  *
  * CANCELLED is terminal. No un-cancel.
  */
@@ -22,7 +30,7 @@
 const TRANSITIONS = Object.freeze({
   DRAFT: new Set(["FINALIZED", "CANCELLED"]),
   FINALIZED: new Set(["INVOICED", "CANCELLED"]),
-  INVOICED: new Set([]), // terminal from module 3
+  INVOICED: new Set(["FINALIZED"]),
   CANCELLED: new Set([]), // terminal
 });
 

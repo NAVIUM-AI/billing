@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  {{> "shared/styles"}}
+</head>
+<body>
+  <div class="page">
+    {{> "shared/header"
+       docTitle="TAX INVOICE"
+       docNumberLabel="Invoice No"
+       docNumber=invoice.invoice_number
+       docDateLabel="Invoice Date"
+       docDate=invoice.invoice_date
+       placeOfSupplyStateName=placeOfSupplyStateName
+       placeOfSupplyStateCode=placeOfSupplyStateCode}}
+
+    {{> "shared/bill-to"
+       natureOfSupply="Rental Services of Motor Vehicles (Outstation Use)"
+       sacCode="9966"
+       billingCycle=billingCycle}}
+
+    <table class="lines-table">
+      <thead>
+        <tr>
+          <th>Sl<br>No</th>
+          <th>Date</th>
+          <th>Trip Sheet<br>No.</th>
+          <th>Vehicle<br>Type</th>
+          <th>Vehicle<br>Number</th>
+          <th>Total Running<br>KM</th>
+          <th>Rate/<br>KM (₹)</th>
+          <th>Running<br>Cost (₹)</th>
+          <th>Driver<br>Bata (₹)</th>
+          <th>Extra<br>Charges (₹)</th>
+          <th>Taxable<br>Value (₹)</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{#each lines}}
+        <tr>
+          <td class="text-center">{{line_number}}</td>
+          <td class="text-center">{{formatDate trip_date}}</td>
+          <td class="text-center">{{trip_sheet_number}}</td>
+          <td class="text-center">{{vehicle_type_label}}</td>
+          <td class="text-center">{{vehicle_number}}</td>
+          <td class="text-center">{{total_km}}</td>
+          <td class="text-right">{{formatMoneyBare per_km_rate_paise}}</td>
+          <td class="text-right">{{formatMoneyBare base_amount_paise}}</td>
+          <td class="text-right">{{formatMoneyBare driver_batta_paise}}</td>
+          <td class="text-right">{{formatMoneyBare extras_amount_paise}}</td>
+          <td class="text-right">{{formatMoneyBare line_amount_paise}}</td>
+        </tr>
+        {{/each}}
+      </tbody>
+      <tfoot>
+        <tr>
+          <td colspan="10" class="text-right">Total</td>
+          <td class="text-right">{{formatMoneyBare subtotal_paise}}</td>
+        </tr>
+      </tfoot>
+    </table>
+
+    <div class="totals-wrap">
+      <div class="totals-left">
+        <div class="totals-left-title">Amount in Words:</div>
+        <div class="totals-left-value">{{amount_in_words}}</div>
+        <div class="totals-left-note">
+          <b>Note:</b> Running cost and driver bata are taxable value
+          for GST purposes. Toll/parking charges are shown as actuals
+          and reimbursed at cost. Input Tax Credit (ITC) is not
+          available to the recipient on this supply as per the
+          applicable GST rate (5% under Notification No.
+          11/2017-CT(Rate), if opted without ITC).
+        </div>
+      </div>
+      <div class="totals-right">
+        <div class="totals-right-row">
+          <div class="totals-right-label">Total Taxable Value</div>
+          <div class="totals-right-value">{{formatMoneyBare subtotal_paise}}</div>
+        </div>
+        {{#if (gt cgst_paise 0)}}
+        <div class="totals-right-row">
+          <div class="totals-right-label">CGST @ {{cgst_rate}}%</div>
+          <div class="totals-right-value">{{formatMoneyBare cgst_paise}}</div>
+        </div>
+        <div class="totals-right-row">
+          <div class="totals-right-label">SGST @ {{sgst_rate}}%</div>
+          <div class="totals-right-value">{{formatMoneyBare sgst_paise}}</div>
+        </div>
+        {{/if}}
+        {{#if (gt igst_paise 0)}}
+        <div class="totals-right-row">
+          <div class="totals-right-label">IGST @ {{gst_rate}}%</div>
+          <div class="totals-right-value">{{formatMoneyBare igst_paise}}</div>
+        </div>
+        {{/if}}
+        {{#if (gt discount_paise 0)}}
+        <div class="totals-right-row">
+          <div class="totals-right-label">Discount</div>
+          <div class="totals-right-value">-{{formatMoneyBare discount_paise}}</div>
+        </div>
+        {{/if}}
+        {{#if (gt reimbursements_paise 0)}}
+        <div class="totals-right-row">
+          <div class="totals-right-label">Toll / Parking / Permit / FASTag</div>
+          <div class="totals-right-value">{{formatMoneyBare reimbursements_paise}}</div>
+        </div>
+        {{/if}}
+        {{#if round_off_paise}}
+        <div class="totals-right-row">
+          <div class="totals-right-label">Round Off</div>
+          <div class="totals-right-value">{{formatMoneyBare round_off_paise}}</div>
+        </div>
+        {{/if}}
+        <div class="totals-right-row grand">
+          <div class="totals-right-label">Total Payable</div>
+          <div class="totals-right-value">{{formatMoney net_payable_paise}}</div>
+        </div>
+      </div>
+    </div>
+
+    {{> "shared/bank-details"}}
+
+    <div class="compliance-note">
+      This is a computer-generated tax invoice. Certified that the
+      particulars given above are true and correct.
+      {{#if customer.credit_days}}Payment due within {{customer.credit_days}} days from the date of invoice.{{/if}}
+      Any discrepancy in this bill must be reported within 7 days of receipt. E.&amp;O.E.
+    </div>
+  </div>
+</body>
+</html>

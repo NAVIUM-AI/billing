@@ -339,6 +339,39 @@ async function transitionStatus(tenantId, id, fromStatus, toStatus, auditFields,
 }
 
 /**
+ * Task 4.3: reverses an invoice-issue trip transition — INVOICED back
+ * to FINALIZED, on invoice cancellation. Deliberately NOT built on top
+ * of transitionStatus: that function's invoiced_at/invoice_id columns
+ * use COALESCE (`COALESCE($9::timestamptz, invoiced_at)`), which can
+ * only ever ADD a value, never CLEAR one back to null — passing null
+ * there is indistinguishable from "leave it alone". Reversal is the one
+ * case that genuinely needs to erase both fields, so it gets its own
+ * guarded statement rather than overloading transitionStatus's
+ * contract (and risking a regression in every other caller that
+ * correctly relies on COALESCE's "don't touch what you didn't pass"
+ * behavior).
+ *
+ * @param {string} tenantId
+ * @param {string} id
+ * @param {import('pg').PoolClient} client
+ * @returns {Promise<object|null>}
+ */
+async function reverseInvoiced(tenantId, id, client) {
+  const result = await client.query(
+    `UPDATE trip_sheets
+     SET status = 'FINALIZED'::trip_status_enum,
+         invoiced_at = NULL,
+         invoice_id = NULL
+     WHERE id = $1::uuid
+       AND tenant_id = $2::uuid
+       AND status = 'INVOICED'::trip_status_enum
+     RETURNING *`,
+    [id, tenantId],
+  );
+  return result.rows[0] || null;
+}
+
+/**
  * Updates only the whitelisted, present keys of `patch`, guarded by
  * `status = 'DRAFT'` in the WHERE — the same "guard in the WHERE, not
  * a separate check" pattern as transitionStatus above. A `null`
@@ -716,6 +749,137 @@ async function listPerformanceRows(
   };
 }
 
+/**
+ * Task 4.1: trips eligible to be added to an invoice — FINALIZED and
+ * either unheld or already held by the SAME draft being edited.
+ * `excludeInvoiceId` lets PATCH re-fetch a draft's own currently-held
+ * trips alongside newly-requested ones (pass null on initial create,
+ * when no invoice exists yet to exempt).
+ *
+ * @param {string} tenantId
+ * @param {string[]} tripIds
+ * @param {?string} excludeInvoiceId
+ * @param {import('pg').PoolClient} client
+ * @returns {Promise<object[]>}
+ */
+async function findFinalizedAndUnheld(tenantId, tripIds, excludeInvoiceId, client) {
+  const result = await client.query(
+    `SELECT * FROM trip_sheets
+     WHERE tenant_id = $1::uuid
+       AND id = ANY($2::uuid[])
+       AND status = 'FINALIZED'::trip_status_enum
+       AND (held_by_invoice_id IS NULL OR held_by_invoice_id = $3::uuid)`,
+    [tenantId, tripIds, excludeInvoiceId || null],
+  );
+  return result.rows;
+}
+
+/**
+ * @param {string} tenantId
+ * @param {string[]} tripIds
+ * @param {string} invoiceId
+ * @param {import('pg').PoolClient} client
+ * @returns {Promise<void>}
+ */
+async function setHold(tenantId, tripIds, invoiceId, client) {
+  await client.query(
+    `UPDATE trip_sheets
+     SET held_by_invoice_id = $3::uuid
+     WHERE tenant_id = $1::uuid
+       AND id = ANY($2::uuid[])
+       AND status = 'FINALIZED'::trip_status_enum`,
+    [tenantId, tripIds, invoiceId],
+  );
+}
+
+/**
+ * @param {string} tenantId
+ * @param {string} invoiceId
+ * @param {import('pg').PoolClient} client
+ * @returns {Promise<void>}
+ */
+async function releaseHold(tenantId, invoiceId, client) {
+  await client.query(
+    `UPDATE trip_sheets
+     SET held_by_invoice_id = NULL
+     WHERE tenant_id = $1::uuid
+       AND held_by_invoice_id = $2::uuid`,
+    [tenantId, invoiceId],
+  );
+}
+
+/**
+ * Task 4.2: lean picker view for "which of this customer's trips can I
+ * invoice right now" — FINALIZED and either unheld or held by the
+ * invoice currently being edited (same `excludeInvoiceId` convention as
+ * findFinalizedAndUnheld). Ordered chronologically ascending, not by
+ * relevance — this is a checklist an ops person scans month by month,
+ * not a search result.
+ *
+ * @param {string} tenantId
+ * @param {string} customerId
+ * @param {?string} excludeInvoiceId
+ * @param {import('pg').PoolClient} client
+ * @returns {Promise<object[]>}
+ */
+async function findInvoiceableForCustomer(tenantId, customerId, excludeInvoiceId, client) {
+  const result = await client.query(
+    `SELECT
+       id, trip_sheet_number, service_type, billing_mode, trip_date,
+       snapshot_vehicle_number, snapshot_vehicle_type,
+       total_km, total_hours, total_days,
+       base_amount_paise, extras_amount_paise, driver_batta_paise,
+       toll_paise, parking_paise, permit_paise, fasttag_paise,
+       advance_paise,
+       subtotal_paise, gross_paise, net_payable_paise,
+       held_by_invoice_id,
+       created_at
+     FROM trip_sheets
+     WHERE tenant_id = $1::uuid
+       AND customer_id = $2::uuid
+       AND status = 'FINALIZED'::trip_status_enum
+       AND (held_by_invoice_id IS NULL OR held_by_invoice_id = $3::uuid)
+     ORDER BY trip_date ASC, id ASC`,
+    [tenantId, customerId, excludeInvoiceId || null],
+  );
+  return result.rows;
+}
+
+/**
+ * Sums each reimbursement column across a set of trips — the data
+ * source for invoice.service.js#computeEffectiveReimbursements'
+ * auto-sum. Deliberately does NOT validate that the trips are
+ * FINALIZED/unheld/belong to this customer — that's
+ * resolveTripsForInvoice's job; this is a pure aggregate over whatever
+ * ids it's given, safe to call even mid-validation since a bad id just
+ * contributes 0.
+ *
+ * @param {string} tenantId
+ * @param {string[]} tripIds
+ * @param {import('pg').PoolClient} client
+ * @returns {Promise<{ toll_paise: number, parking_paise: number, permit_paise: number, fasttag_paise: number }>}
+ */
+async function summarizeReimbursements(tenantId, tripIds, client) {
+  const result = await client.query(
+    `SELECT
+       COALESCE(SUM(toll_paise), 0)    AS toll_paise,
+       COALESCE(SUM(parking_paise), 0) AS parking_paise,
+       COALESCE(SUM(permit_paise), 0)  AS permit_paise,
+       COALESCE(SUM(fasttag_paise), 0) AS fasttag_paise
+     FROM trip_sheets
+     WHERE tenant_id = $1::uuid
+       AND id = ANY($2::uuid[])`,
+    [tenantId, tripIds],
+  );
+  const row = result.rows[0];
+  return {
+    toll_paise: Number(row.toll_paise) || 0,
+    parking_paise: Number(row.parking_paise) || 0,
+    permit_paise: Number(row.permit_paise) || 0,
+    fasttag_paise: Number(row.fasttag_paise) || 0,
+  };
+}
+
 module.exports = {
   insert,
   findById,
@@ -725,4 +889,10 @@ module.exports = {
   updateDraft,
   list,
   listPerformanceRows,
+  findFinalizedAndUnheld,
+  setHold,
+  releaseHold,
+  findInvoiceableForCustomer,
+  summarizeReimbursements,
+  reverseInvoiced,
 };
