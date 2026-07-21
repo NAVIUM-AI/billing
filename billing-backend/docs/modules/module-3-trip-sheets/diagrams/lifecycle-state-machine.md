@@ -1,6 +1,6 @@
 # Lifecycle state machine
 
-_Last updated: 2026-07-19. Reviewers: TBD._
+_Last updated: 2026-07-20. Reviewers: TBD._
 
 The full legal-transition table lives in `src/domain/tripLifecycle/index.js` as a `TRANSITIONS` map of `Set`s — the diagram below is a direct rendering of that map, not a separate model that could drift from the code.
 
@@ -9,10 +9,10 @@ stateDiagram-v2
     [*] --> DRAFT: POST /trips (trips:write)
     DRAFT --> FINALIZED: POST /trips/:id/finalize (trips:finalize)
     DRAFT --> CANCELLED: POST /trips/:id/cancel (trips:cancel)
-    FINALIZED --> INVOICED: Module 4 invoice-issue flow (markTripInvoiced, no route in Module 3)
+    FINALIZED --> INVOICED: Module 4 invoice-issue flow (markTripsInvoiced, no route in Module 3)
     FINALIZED --> CANCELLED: POST /trips/:id/cancel (trips:cancel, reversal case)
+    INVOICED --> FINALIZED: Module 4 invoice-cancel flow (reverseTripInvoiced, Task 4.3)
     CANCELLED --> [*]
-    INVOICED --> [*]
 
     note right of DRAFT
         Editable via PATCH (trips:write).
@@ -40,10 +40,16 @@ stateDiagram-v2
     end note
 
     note right of INVOICED
-        Terminal from Module 3's own
-        perspective. A post-invoice
-        reversal is a Module 4 credit-note
-        concern, not a Module 3 transition.
+        Not terminal as of Task 4.3: an
+        ISSUED/PAID invoice cancellation
+        (Module 4 credit-note flow) reverses
+        this back to FINALIZED, making the
+        trip re-invoiceable. Originally
+        shipped terminal (Task 3.3), on the
+        assumption the reversal would be a
+        purely invoice-level concern — it
+        turned out the trip's own state
+        machine has to allow it too.
     end note
 ```
 

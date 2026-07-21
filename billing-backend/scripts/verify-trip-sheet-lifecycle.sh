@@ -597,18 +597,27 @@ else
   fail "DB-layer isolation: 0 rows in trip_sheets with no tenant context" "trip_sheets='$DB_COUNT_TRIPS'"
 fi
 
-# ─── Step 28: markTripInvoiced service function guard ───
-# Matches an actual invocation (`.markTripInvoiced(` or
-# `markTripInvoiced(` as a declaration) — NOT a bare grep for the name,
-# which would false-positive on trips.routes.js's own top-of-file
-# comment explaining why no such route exists.
-HAS_FUNCTION=$(grep -cE "function markTripInvoiced|markTripInvoiced\s*=" src/services/tripSheet.service.js 2>/dev/null || echo 0)
-REFERENCED_IN_ROUTES=$(grep -rlE "\.markTripInvoiced\(" src/api/ 2>/dev/null | wc -l | tr -d '[:space:]')
+# ─── Step 28: trip-status wiring functions guard ───
+# markTripInvoiced (Task 3.3 — db-based, single-trip, never actually
+# integrated) was superseded in Task 4.3 by markTripsInvoiced /
+# reverseTripInvoiced (client-based, batched) once Module 4 actually
+# wired up invoice issue/cancel — see tripSheet.service.js's own
+# comment on markTripsInvoiced for why the db-based shape couldn't
+# work for a caller-owned transaction. Confirms both exist as service
+# functions, are actually consumed by invoice.service.js, and are
+# still never called directly from a route file — the real HTTP entry
+# points are POST /invoices/:id/issue and /cancel, which call
+# invoiceService.issueInvoice/cancelInvoice, not these trip functions
+# directly.
+HAS_MARK_FN=$(grep -cE "function markTripsInvoiced|markTripsInvoiced\s*=" src/services/tripSheet.service.js 2>/dev/null || echo 0)
+HAS_REVERSE_FN=$(grep -cE "function reverseTripInvoiced|reverseTripInvoiced\s*=" src/services/tripSheet.service.js 2>/dev/null || echo 0)
+CALLED_BY_INVOICE_SERVICE=$(grep -cE "tripService\.(markTripsInvoiced|reverseTripInvoiced)\(" src/services/invoice.service.js 2>/dev/null || echo 0)
+REFERENCED_IN_ROUTES=$(grep -rlE "\.(markTripsInvoiced|reverseTripInvoiced)\(" src/api/ 2>/dev/null | wc -l | tr -d '[:space:]')
 
-if [ "$HAS_FUNCTION" -gt 0 ] && [ "$REFERENCED_IN_ROUTES" = "0" ]; then
-  pass "markTripInvoiced exists as a service function but is called from no route file (not exposed as an API endpoint)"
+if [ "$HAS_MARK_FN" -gt 0 ] && [ "$HAS_REVERSE_FN" -gt 0 ] && [ "$CALLED_BY_INVOICE_SERVICE" -gt 0 ] && [ "$REFERENCED_IN_ROUTES" = "0" ]; then
+  pass "markTripsInvoiced/reverseTripInvoiced exist and are wired into invoice.service.js (Task 4.3), never called directly from a route file"
 else
-  fail "markTripInvoiced guard" "function occurrences=$HAS_FUNCTION, route files calling it=$REFERENCED_IN_ROUTES"
+  fail "trip-status wiring guard" "mark_fn=$HAS_MARK_FN, reverse_fn=$HAS_REVERSE_FN, called_by_invoice_service=$CALLED_BY_INVOICE_SERVICE, route files calling directly=$REFERENCED_IN_ROUTES"
 fi
 
 # ─── Step 29: regression — trip creation still works ───
