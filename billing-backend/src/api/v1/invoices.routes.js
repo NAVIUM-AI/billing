@@ -25,6 +25,7 @@ const {
 const { recordPaymentSchema, applyAdvanceSchema } = require("../../validators/payment.validator");
 const invoiceService = require("../../services/invoice.service");
 const paymentService = require("../../services/payment.service");
+const pdfService = require("../../services/pdf.service");
 
 const router = express.Router();
 
@@ -136,6 +137,31 @@ router.post(
       req.db,
     );
     res.json(result);
+  },
+);
+
+router.post(
+  "/:invoiceId/pdf",
+  requirePermission("invoices:read"),
+  validate(invoiceIdParamSchema, "params"),
+  async (req, res) => {
+    const result = await pdfService.generateInvoicePdf(req.tenantId, req.params.invoiceId, req.db);
+    res.json(result);
+  },
+);
+
+router.get(
+  "/:invoiceId/pdf",
+  requirePermission("invoices:read"),
+  validate(invoiceIdParamSchema, "params"),
+  async (req, res) => {
+    const { buffer, filename } = await pdfService.getInvoicePdfBuffer(req.tenantId, req.params.invoiceId, req.db);
+    res.set({
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `attachment; filename="${filename}"`,
+      "Content-Length": buffer.length,
+    });
+    res.send(buffer);
   },
 );
 

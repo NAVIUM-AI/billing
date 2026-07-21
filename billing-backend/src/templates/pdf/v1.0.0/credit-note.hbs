@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  {{> "shared/styles"}}
+</head>
+<body>
+  <div class="page">
+    {{> "shared/header"
+       docTitle="CREDIT NOTE"
+       docNumberLabel="Credit Note No"
+       docNumber=credit_note.credit_note_number
+       docDateLabel="Credit Note Date"
+       docDate=credit_note.credit_note_date
+       placeOfSupplyStateName=placeOfSupplyStateName
+       placeOfSupplyStateCode=placeOfSupplyStateCode}}
+
+    <div class="header-doc-meta" style="margin-bottom: 15px;">
+      <div>
+        <span class="label">Reference Invoice:</span>
+        {{original_invoice.invoice_number}}
+      </div>
+      <div>
+        <span class="label">Reference Date:</span>
+        {{formatDate original_invoice.invoice_date}}
+      </div>
+    </div>
+
+    {{> "shared/bill-to"
+       natureOfSupply=natureOfSupply
+       sacCode="9966"}}
+
+    <table class="lines-table">
+      <thead>
+        <tr>
+          <th>Sl No</th>
+          <th>Description</th>
+          <th>Amount Reversed (₹)</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="text-center">1</td>
+          <td class="text-left">Reversal of {{original_invoice.invoice_number}} dated {{formatDate original_invoice.invoice_date}}</td>
+          <td class="text-right">{{formatMoneyBare credit_note.grand_total_paise}}</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="totals-wrap">
+      <div class="totals-left">
+        <div class="totals-left-title">Reason for Credit Note:</div>
+        <div class="totals-left-value">{{credit_note.reason}}</div>
+        <div class="totals-left-title" style="margin-top: 10px;">Amount in Words:</div>
+        <div class="totals-left-value">{{credit_note.amount_in_words}}</div>
+      </div>
+      <div class="totals-right">
+        <div class="totals-right-row">
+          <div class="totals-right-label">Total Taxable Reversal</div>
+          <div class="totals-right-value">{{formatMoneyBare credit_note.subtotal_paise}}</div>
+        </div>
+        {{#if (gt credit_note.cgst_paise 0)}}
+        <div class="totals-right-row">
+          <div class="totals-right-label">CGST</div>
+          <div class="totals-right-value">{{formatMoneyBare credit_note.cgst_paise}}</div>
+        </div>
+        <div class="totals-right-row">
+          <div class="totals-right-label">SGST</div>
+          <div class="totals-right-value">{{formatMoneyBare credit_note.sgst_paise}}</div>
+        </div>
+        {{/if}}
+        {{#if (gt credit_note.igst_paise 0)}}
+        <div class="totals-right-row">
+          <div class="totals-right-label">IGST</div>
+          <div class="totals-right-value">{{formatMoneyBare credit_note.igst_paise}}</div>
+        </div>
+        {{/if}}
+        {{#if (gt reimbursements_paise 0)}}
+        <div class="totals-right-row">
+          <div class="totals-right-label">Toll / Parking / Permit / FASTag</div>
+          <div class="totals-right-value">{{formatMoneyBare reimbursements_paise}}</div>
+        </div>
+        {{/if}}
+        <div class="totals-right-row grand">
+          <div class="totals-right-label">Total Credit</div>
+          <div class="totals-right-value">{{formatMoney credit_note.net_payable_paise}}</div>
+        </div>
+      </div>
+    </div>
+
+    {{> "shared/bank-details"}}
+
+    <div class="compliance-note">
+      This is a system-generated credit note issued in reversal of the
+      referenced tax invoice. The original invoice is void and cannot
+      be used to claim Input Tax Credit. E.&amp;O.E.
+    </div>
+  </div>
+</body>
+</html>

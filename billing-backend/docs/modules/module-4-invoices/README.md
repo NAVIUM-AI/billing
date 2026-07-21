@@ -1,6 +1,33 @@
 # Module 4: Invoicing & GST
 
-_Status: in progress. Task 4.1 (invoice foundation, GST domain, draft CRUD, trip hold), Task 4.2 (invoiceable trips picker, reimbursement auto-sum, line description editing), Task 4.3 (invoice lifecycle, numbering, immutability, credit-note cancellation), and Task 4.4 (payments ledger, PAID transition, customer statement, aging report) are complete. Full module documentation (mirroring Module 2/3's structure) lands after Task 4.6._
+_Status: in progress. Task 4.1 (invoice foundation, GST domain, draft CRUD, trip hold), Task 4.2 (invoiceable trips picker, reimbursement auto-sum, line description editing), Task 4.3 (invoice lifecycle, numbering, immutability, credit-note cancellation), Task 4.4 (payments ledger, PAID transition, customer statement, aging report), and Task 4.5 (PDF rendering for invoices + credit notes) are complete. Full module documentation (mirroring Module 2/3's structure) lands after Task 4.6._
+
+## Task 4.5: PDF rendering for invoices + credit notes
+
+Status: Complete.
+
+**Engine** (`src/services/pdfEngine.service.js`): a single Puppeteer browser instance kept alive for the app's lifetime (launch is ~500ms; pages within it are cheap), driving Handlebars templates compiled once and cached by `(name, version)`. `puppeteer-core` is used instead of `puppeteer` — see the flagged deviation below. Templates live under `src/templates/pdf/v1.0.0/`, versioned by directory so a layout change never retroactively alters an already-generated historical PDF: `pdf.service.js` always renders with the template version already stamped on the invoice/credit-note row (falling back to the current version only on first generation).
+
+**Storage**: PDFs are written to `PDF_STORAGE_ROOT` (env var, default `./pdf-storage`, gitignored), under `{tenantId}/invoices/` or `{tenantId}/credit-notes/`. Generation is synchronous — `POST .../pdf` blocks until the file is written and `pdf_url`/`pdf_generated_at`/`pdf_template_version`/`pdf_file_size_bytes` are persisted — and idempotent, since a regeneration simply overwrites the same file (name is `{id}-{templateVersion}.pdf`, so there's exactly one file per document per template version).
+
+**Endpoints**: `POST`/`GET /invoices/:id/pdf` and `POST`/`GET /credit-notes/:id/pdf`, all gated on `invoices:read`. `POST` generates (or regenerates) and returns metadata; `GET` streams the stored bytes with `Content-Type: application/pdf` and a filename derived from the invoice/credit-note number. PDFs can only be generated for non-DRAFT invoices (`INVOICE_NOT_ISSUED` otherwise) — draft financials aren't legally final yet.
+
+**Render context comes from the frozen snapshots, not live data**: `invoice.tenant_snapshot`/`invoice.customer_snapshot` (and the credit note's own snapshots) — the same write-once JSONB Task 4.3 already populates at issue/cancel — are the render source, not a fresh tenant/customer lookup. Since PDF generation is only ever legal on non-DRAFT documents, the snapshot is always present and is exactly "state as of issue," which is what a legal document must show regardless of what the tenant/customer record looks like today.
+
+**Four templates**: Yellow (`invoice-local-tax.hbs`, LOCAL service_type), Blue (`invoice-outstation-tax.hbs`, OUTSTATION), Performance (`invoice-performance.hbs`, zero GST), and `credit-note.hbs`. TAX-invoice template selection uses the first line's `service_type` — Task 4.3 already guarantees a single service_type per invoice, so the first line is authoritative.
+
+**Five flagged spec deviations, all resolved by using only fields that actually exist in this schema** (same "reality over spec prose" precedent as Task 4.3's `invoiceSnapshot.js`, documented in full at the top of `pdf.service.js`):
+1. `tenants` has no tagline/phone/phone2/email/website/address columns at all — only `name`/`gstin`/`pan`/`state_code`/`logo_url`/`bank_details`/`gst_rate`. The header/bank-details templates render only what exists.
+2. `invoices` has no `reverse_charge` or place-of-supply column — "Place of Supply" is derived from the customer's `state_code` (the standard GST convention: the recipient's state), not a fabricated invoice column.
+3. `invoice_lines` stores one combined `extras_amount_paise` per line, not a base_km/base_hours/extra_km_rate/extra_hr_rate split that was never part of the Task 4.1 schema — the tables show Package Amount + Extra Charges + Driver Bata + Taxable Value instead. Per-km rate IS shown on the Blue/Performance tables, but only as a derived display value (`base_amount_paise / total_km`), never written back to the DB.
+4. `invoice_lines` has no per-line toll column — toll/parking/permit/fasttag are invoice-level aggregates only, shown once in the totals block.
+5. `credit_notes` has no line-item table at all, only the original invoice's frozen aggregate totals — `credit-note.hbs` renders the single-row "reversal of invoice X" summary instead of fabricated per-line detail that has nothing to read from.
+
+**One infrastructure deviation, not a schema one**: the full `puppeteer` package's postinstall step downloads a bundled ~300MB Chromium; in this environment that download connected but transferred zero bytes for 14+ minutes — the exact corporate-proxy failure mode the task spec anticipated. Switched to `puppeteer-core` driving the system's already-installed Google Chrome (`src/services/pdfEngine.service.js#findChromeExecutable`, overridable via `CHROME_EXECUTABLE_PATH`), which needs no download at all.
+
+**One real bug caught by looking at the rendered output, not just green tests** (Rule 9 — ships in this commit): a first draft of `src/constants/gstStateCodes.js` keyed state names by the official numeric CBIC GST code ("29" → Karnataka). But `tenants.state_code`/`customers.state_code` in this app are 2-letter abbreviations ("KA"), derived from a GSTIN's leading digits via `src/utils/gstin.js#GST_STATE_MAP` and compared as plain strings by `src/domain/gst/index.js#isSameState` — the numeric code never appears anywhere in this schema. The lookup silently missed on every tenant/customer, so "Place of Supply" never rendered on any PDF despite every automated check passing (byte count > 0 says nothing about which fields rendered). Caught by actually opening a generated PDF; fixed by re-keying the constant to the 2-letter codes this app really uses.
+
+Verified via `scripts/verify-pdf.sh` (18 checks: all three invoice templates + credit note generate real PDFs with correct `Content-Type`/`%PDF` magic bytes/matching byte length; DRAFT invoices reject PDF generation; ungenerated PDFs 404; regeneration is idempotent; cross-tenant access is denied; unauthenticated access is denied) — per Rule 11, these assert that a PDF *was generated correctly*, not specific byte content, since exact Chromium rendering output is a browser-version concern, not application logic.
 
 ## Task 4.4: Payments ledger + PAID transition + customer statement + aging report
 
