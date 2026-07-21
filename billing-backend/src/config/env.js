@@ -8,6 +8,8 @@
  * some request handler.
  */
 
+const path = require("path");
+
 require("dotenv").config();
 
 const REQUIRED_VARS = ["DATABASE_URL", "JWT_ACCESS_SECRET", "JWT_REFRESH_SECRET"];
@@ -33,6 +35,9 @@ const env = {
     secure: process.env.COOKIE_SECURE === "true",
     domain: process.env.COOKIE_DOMAIN || "localhost",
   },
+  pdfStorageRoot: process.env.PDF_STORAGE_ROOT
+    ? path.resolve(process.env.PDF_STORAGE_ROOT)
+    : path.join(process.cwd(), "pdf-storage"),
 };
 
 module.exports = Object.freeze(env);

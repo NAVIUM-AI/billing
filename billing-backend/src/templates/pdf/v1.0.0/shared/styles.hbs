@@ -1,0 +1,271 @@
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Helvetica', 'Arial', sans-serif;
+    font-size: 10px;
+    color: #333;
+    line-height: 1.4;
+  }
+
+  .page {
+    width: 100%;
+    padding: 0;
+  }
+
+  /* HEADER */
+  .header-wrap {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    padding-bottom: 10px;
+    border-bottom: 3px solid #2e7d32;
+    margin-bottom: 15px;
+  }
+
+  .header-left {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .header-logo {
+    width: 50px;
+    height: 50px;
+    background: #2e7d32;
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: bold;
+    font-size: 20px;
+    border-radius: 4px;
+  }
+
+  .header-tenant-name {
+    color: #2e7d32;
+    font-size: 18px;
+    font-weight: bold;
+    margin-bottom: 2px;
+  }
+
+  .header-tenant-address {
+    font-size: 9px;
+    color: #555;
+    line-height: 1.3;
+  }
+
+  .header-right {
+    text-align: right;
+  }
+
+  .header-doc-title {
+    color: #2e7d32;
+    font-size: 20px;
+    font-weight: bold;
+    margin-bottom: 10px;
+  }
+
+  .header-doc-meta {
+    font-size: 10px;
+  }
+
+  .header-doc-meta div {
+    margin-bottom: 2px;
+  }
+
+  .header-doc-meta .label {
+    font-weight: bold;
+    display: inline-block;
+    min-width: 100px;
+  }
+
+  /* BILL TO / SERVICE DETAILS BLOCK */
+  .info-blocks {
+    display: flex;
+    gap: 15px;
+    margin-bottom: 15px;
+  }
+
+  .info-block {
+    flex: 1;
+    border: 1px solid #ddd;
+    padding: 8px;
+    border-radius: 3px;
+  }
+
+  .info-block-title {
+    color: #2e7d32;
+    font-weight: bold;
+    font-size: 10px;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid #eee;
+  }
+
+  .info-block-content {
+    font-size: 9px;
+    line-height: 1.5;
+  }
+
+  .info-block-content .customer-name {
+    font-weight: bold;
+    font-size: 11px;
+  }
+
+  .info-block-content .label {
+    font-weight: bold;
+  }
+
+  /* LINE ITEMS TABLE */
+  .lines-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 15px;
+    font-size: 9px;
+  }
+
+  .lines-table th {
+    background: #2e7d32;
+    color: white;
+    padding: 6px 4px;
+    text-align: center;
+    font-weight: bold;
+    border: 1px solid #1b5e20;
+    vertical-align: middle;
+  }
+
+  .lines-table td {
+    padding: 6px 4px;
+    border: 1px solid #ddd;
+    vertical-align: middle;
+  }
+
+  .lines-table td.text-center { text-align: center; }
+  .lines-table td.text-right { text-align: right; }
+  .lines-table td.text-left { text-align: left; }
+
+  .lines-table tfoot td {
+    font-weight: bold;
+    background: #f5f5f5;
+  }
+
+  /* TOTALS BLOCK */
+  .totals-wrap {
+    display: flex;
+    gap: 15px;
+    margin-bottom: 15px;
+  }
+
+  .totals-left {
+    flex: 1;
+    border: 1px solid #ddd;
+    padding: 10px;
+    border-radius: 3px;
+  }
+
+  .totals-left-title {
+    font-weight: bold;
+    margin-bottom: 4px;
+  }
+
+  .totals-left-value {
+    font-size: 10px;
+    line-height: 1.5;
+  }
+
+  .totals-left-note {
+    font-size: 8px;
+    color: #555;
+    margin-top: 8px;
+    line-height: 1.5;
+  }
+
+  .totals-right {
+    min-width: 300px;
+  }
+
+  .totals-right-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 8px;
+    border-bottom: 1px solid #eee;
+  }
+
+  .totals-right-row.grand {
+    background: #2e7d32;
+    color: white;
+    font-weight: bold;
+    font-size: 12px;
+    padding: 8px;
+    border: none;
+    margin-top: 4px;
+  }
+
+  .totals-right-label {
+    flex: 1;
+  }
+
+  .totals-right-value {
+    text-align: right;
+    font-weight: bold;
+  }
+
+  /* BANK DETAILS + SIGNATURE */
+  .footer-wrap {
+    display: flex;
+    gap: 15px;
+    margin-top: 15px;
+  }
+
+  .footer-left {
+    flex: 1;
+    border: 1px solid #ddd;
+    padding: 8px;
+    border-radius: 3px;
+  }
+
+  .footer-left-title {
+    color: #2e7d32;
+    font-weight: bold;
+    text-transform: uppercase;
+    font-size: 10px;
+    margin-bottom: 6px;
+  }
+
+  .footer-left-content {
+    font-size: 9px;
+    line-height: 1.5;
+  }
+
+  .footer-right {
+    min-width: 200px;
+    text-align: right;
+    padding: 8px;
+    font-size: 9px;
+  }
+
+  .footer-right-name {
+    font-weight: bold;
+    margin-bottom: 30px;
+  }
+
+  .footer-right-signature {
+    border-top: 1px solid #333;
+    padding-top: 4px;
+    display: inline-block;
+    min-width: 150px;
+  }
+
+  /* FOOTER COMPLIANCE NOTE */
+  .compliance-note {
+    margin-top: 20px;
+    padding-top: 8px;
+    border-top: 1px solid #ddd;
+    font-size: 8px;
+    color: #555;
+    font-style: italic;
+    line-height: 1.4;
+  }
+</style>

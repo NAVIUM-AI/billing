@@ -101,6 +101,30 @@ async function listByInvoice(tenantId, invoiceId, client) {
 }
 
 /**
+ * Same rows as listByInvoice, plus the parent trip sheet's
+ * trip_sheet_number — invoice_lines only stores trip_sheet_id (Task
+ * 4.1), but the PDF layout (Task 4.5) shows the human-readable sheet
+ * number, so this joins in exactly that one extra column rather than
+ * denormalizing it onto invoice_lines itself.
+ *
+ * @param {string} tenantId
+ * @param {string} invoiceId
+ * @param {import('pg').PoolClient} client
+ * @returns {Promise<object[]>}
+ */
+async function listByInvoiceForPdf(tenantId, invoiceId, client) {
+  const result = await client.query(
+    `SELECT il.*, ts.trip_sheet_number
+     FROM invoice_lines il
+     JOIN trip_sheets ts ON ts.id = il.trip_sheet_id AND ts.tenant_id = il.tenant_id
+     WHERE il.invoice_id = $1 AND il.tenant_id = $2
+     ORDER BY il.line_number ASC`,
+    [invoiceId, tenantId],
+  );
+  return result.rows;
+}
+
+/**
  * @param {string} tenantId
  * @param {string} invoiceId
  * @param {string} lineId
@@ -164,4 +188,4 @@ async function updateLine(tenantId, invoiceId, lineId, patch, client) {
   return result.rows[0] || null;
 }
 
-module.exports = { insertBatch, deleteByInvoice, listByInvoice, findById, updateLine };
+module.exports = { insertBatch, deleteByInvoice, listByInvoice, listByInvoiceForPdf, findById, updateLine };
