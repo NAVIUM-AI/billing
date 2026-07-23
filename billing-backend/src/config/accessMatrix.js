@@ -60,8 +60,13 @@ module.exports = Object.freeze({
   "payments:record": ["owner", "admin", "accountant", "staff"],
   "payments:cancel": ["owner", "admin", "accountant"],
   "payments:read": ["owner", "admin", "accountant", "staff", "viewer"],
-  // Narrower than the pre-Task-4.4 placeholder (no staff, no viewer,
-  // per the Task 4.4 spec) — receivables/aging data is financial
-  // reporting, not an operational read like trips:read or payments:read.
-  "reports:read": ["owner", "admin", "accountant"],
+  // Narrower than the pre-Task-4.4 placeholder (no staff, per the Task
+  // 4.4 spec) — receivables/aging data is financial reporting, not an
+  // operational read like trips:read or payments:read. Widened to
+  // include viewer in Task 4.6: viewer is this system's read-only role
+  // by design, and the aging report is a pure read — there was no
+  // reason to exclude it. staff remains excluded: staff is
+  // operational (front-desk data entry), not analytical, in the
+  // current role model.
+  "reports:read": ["owner", "admin", "accountant", "viewer"],
 });

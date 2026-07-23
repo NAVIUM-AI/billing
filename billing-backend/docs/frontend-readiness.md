@@ -1,8 +1,8 @@
 # Frontend readiness inventory
 
-_Last updated: 2026-07-19. Reviewers: TBD._
+_Last updated: 2026-07-23. Reviewers: TBD._
 
-A single-file reference for a frontend developer starting work against Modules 1-3 of this API. Assumes zero backend context. Sourced entirely from the actual route files, validators, and services — every claim below is checkable against `src/` if it looks wrong.
+A single-file reference for a frontend developer starting work against Modules 1-4 of this API. Assumes zero backend context. Sourced entirely from the actual route files, validators, and services — every claim below is checkable against `src/` if it looks wrong.
 
 ## 1. Base URL and auth
 
@@ -95,9 +95,16 @@ Reproduced from `src/config/accessMatrix.js` (the authoritative source — cross
 | `trips:write` | owner, admin, accountant, staff |
 | `trips:finalize` | owner, admin, accountant |
 | `trips:cancel` | owner, admin, accountant |
-| `invoices:*`, `payments:*`, `reports:read` | defined for Module 4+, not yet consumed by any route |
+| `invoices:read` | owner, admin, accountant, staff, viewer |
+| `invoices:draft` | owner, admin, accountant, staff |
+| `invoices:issue` | owner, admin, accountant |
+| `invoices:cancel` | owner, admin |
+| `payments:record` | owner, admin, accountant, staff |
+| `payments:cancel` | owner, admin, accountant |
+| `payments:read` | owner, admin, accountant, staff, viewer |
+| `reports:read` | owner, admin, accountant, viewer |
 
-Rough role hierarchy for UI-gating purposes: `owner` and `admin` can do nearly everything; `accountant` handles financial/closing operations (finalize, cancel) plus read access everywhere; `staff` does day-to-day data entry (create/edit/finalize trips and masters, but cannot cancel a trip or write pricing rates); `viewer` is read-only everywhere. This is a paraphrase for UI-design purposes, not a substitute for checking the table above against a specific permission key.
+Rough role hierarchy for UI-gating purposes: `owner` and `admin` can do nearly everything; `accountant` handles financial/closing operations (finalize, cancel, issue invoices) plus read access everywhere, including the receivables aging report; `staff` does day-to-day data entry (create/edit/finalize trips and masters, draft invoices, record payments) but cannot issue or cancel an invoice, cannot cancel a payment, and cannot access financial reports; `viewer` is read-only everywhere, including the aging report (widened to include it in Task 4.6 — it was previously accountant-and-above only). This is a paraphrase for UI-design purposes, not a substitute for checking the table above against a specific permission key.
 
 **UX pattern for 403s:** the response includes `error.details.required` naming the permission key that was missing (e.g. `"trips:cancel"`). A reasonable default UI treatment is "You need the `<required>` permission to do this" or a role-aware friendlier string mapped from the same key client-side.
 
@@ -190,6 +197,61 @@ GET    /trips/:tripId                       — trips:read     — Get one, full
 PATCH  /trips/:tripId                       — trips:write    — Edit a DRAFT trip
 POST   /trips/:tripId/finalize              — trips:finalize — DRAFT → FINALIZED
 POST   /trips/:tripId/cancel                — trips:cancel   — DRAFT/FINALIZED → CANCELLED
+```
+
+**Invoices** — `src/api/v1/invoices.routes.js`, mounted at `/api/v1/invoices`
+
+```
+POST   /invoices                       — invoices:draft  — Create a DRAFT invoice from FINALIZED trips
+GET    /invoices/:invoiceId             — invoices:read   — Get one, with lines + customer/tenant refs
+PATCH  /invoices/:invoiceId             — invoices:draft  — Edit a DRAFT invoice
+DELETE /invoices/:invoiceId             — invoices:draft  — Delete a DRAFT invoice
+POST   /invoices/:invoiceId/issue       — invoices:issue  — DRAFT -> ISSUED (allocates number, freezes snapshots)
+POST   /invoices/:invoiceId/cancel      — invoices:cancel — -> CANCELLED (issues a credit note if ISSUED/PAID)
+PATCH  /invoices/:invoiceId/lines/:lineId — invoices:draft — Edit one line's description (DRAFT only)
+POST   /invoices/:invoiceId/payments    — payments:record — Record a payment against this invoice
+POST   /invoices/:invoiceId/apply-advance — payments:record — Apply an unallocated advance to this invoice
+POST   /invoices/:invoiceId/pdf         — invoices:read   — Generate (or regenerate) the invoice PDF
+GET    /invoices/:invoiceId/pdf         — invoices:read   — Download the generated PDF
+```
+
+There is no `GET /invoices` list endpoint — invoice listing/search is not built yet (see `docs/modules/module-4-invoices/known-issues.md`).
+
+**Invoiceable trips picker** — nested under `/api/v1/customers`
+
+```
+GET    /customers/:customerId/invoiceable-trips — invoices:draft — FINALIZED, unheld trips grouped LOCAL/OUTSTATION
+```
+
+**Credit notes** — `src/api/v1/creditNotes.routes.js`, mounted at `/api/v1/credit-notes`. Read-only from the API's perspective — created internally by cancelling an ISSUED/PAID invoice, never via a POST here.
+
+```
+GET    /credit-notes                      — invoices:read — List
+GET    /credit-notes/:creditNoteId         — invoices:read — Get one
+POST   /credit-notes/:creditNoteId/pdf     — invoices:read — Generate (or regenerate) the credit-note PDF
+GET    /credit-notes/:creditNoteId/pdf     — invoices:read — Download the generated PDF
+```
+
+**Payments** — `src/api/v1/payments.routes.js`, mounted at `/api/v1/payments`, plus two routes nested under `/customers`
+
+```
+GET    /payments                        — payments:read   — List with filters
+GET    /payments/:paymentId              — payments:read   — Get one
+POST   /payments/:paymentId/cancel       — payments:cancel — The ONLY way to reverse a payment (no DELETE)
+POST   /customers/:customerId/advances   — payments:record — Standalone advance, not tied to any invoice
+GET    /customers/:customerId/ledger     — payments:read   — Full statement: invoices + payments, running balance
+```
+
+**Reports** — `src/api/v1/reports.routes.js`, mounted at `/api/v1/reports`
+
+```
+GET    /reports/receivables-aging — reports:read — Outstanding ISSUED invoices bucketed by days overdue
+```
+
+**Customer quick-create** — nested under `/api/v1/customers` (Task 4.6)
+
+```
+POST   /customers/quick-create — customers:write — Minimal-field customer creation for an inline modal
 ```
 
 Not for frontend use: `src/api/v1/pings.routes.js` (`/pings`, `/pings/leak-test`) is a throwaway internal demo used to prove tenant isolation during Module 1's development. It's still mounted, but nothing in a real UI should call it.
@@ -470,7 +532,221 @@ type PerformanceSheet = {
   filters_applied: Record<string, unknown>;
 };
 
-type Invoice = never; // Module 4 — not built yet, do not model this
+type InvoiceType = "TAX" | "PERFORMANCE";
+type InvoiceStatus = "DRAFT" | "ISSUED" | "PAID" | "CANCELLED";
+
+type InvoiceLine = {
+  id: string;
+  invoice_id: string;
+  trip_sheet_id: string;
+  line_number: number;
+  service_type: TripServiceType; // snapshot from the trip
+  trip_date: string; // YYYY-MM-DD
+  vehicle_number: string;
+  vehicle_type: VehicleType;
+  total_km: number;
+  total_hours: number | null;
+  total_days: number | null;
+  base_amount_paise: number;
+  extras_amount_paise: number; // LOCAL only — always 0 for OUTSTATION lines
+  driver_batta_paise: number;
+  line_amount_paise: number; // = base + extras + batta
+  hsn_sac_code: string; // "996601" on every line
+  description: string; // the ONLY user-editable field on a line
+  created_at: string;
+};
+
+// GET /invoices/:id, and the response of POST/PATCH/issue/cancel.
+type Invoice = {
+  id: string;
+  tenant_id: string;
+  invoice_number: string | null; // null until ISSUED
+  invoice_type: InvoiceType;
+  status: InvoiceStatus;
+  customer_id: string;
+  invoice_date: string; // YYYY-MM-DD
+  due_date: string;
+  notes: string | null;
+  terms: string | null;
+  subtotal_paise: number;
+  gst_rate_snapshot: number | null; // null for PERFORMANCE
+  cgst_paise: number;
+  sgst_paise: number;
+  igst_paise: number;
+  total_gst_paise: number;
+  toll_paise: number;
+  parking_paise: number;
+  permit_paise: number;
+  fasttag_paise: number;
+  toll_manual_override: boolean;
+  parking_manual_override: boolean;
+  permit_manual_override: boolean;
+  fasttag_manual_override: boolean;
+  discount_paise: number;
+  discount_reason: string | null;
+  round_off_paise: number; // signed
+  grand_total_paise: number;
+  net_payable_paise: number;
+  amount_in_words: string | null;
+  tenant_snapshot: Record<string, unknown> | null; // null until ISSUED, then permanently frozen
+  customer_snapshot: Record<string, unknown> | null; // same
+  pdf_url: string | null;
+  pdf_generated_at: string | null;
+  pdf_template_version: string | null;
+  pdf_file_size_bytes: number | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+  issued_at: string | null;
+  issued_by: string | null;
+  cancelled_at: string | null;
+  cancelled_by: string | null;
+  cancellation_reason: string | null;
+  credit_note_id: string | null;
+  lines: InvoiceLine[];
+  // present only on GET /invoices/:id, not on POST/PATCH/issue/cancel responses:
+  customer?: { id: string; customer_type: CustomerType; name: string | null; company_name: string | null; gstin: string | null; state_code: string | null };
+  tenant?: { id: string; name: string; gstin: string | null; state_code: string | null };
+};
+
+type CreditNote = {
+  id: string;
+  tenant_id: string;
+  credit_note_number: string;
+  original_invoice_id: string;
+  customer_id: string;
+  customer_snapshot: Record<string, unknown>; // as of CANCELLATION, not copied from the invoice
+  tenant_snapshot: Record<string, unknown>;
+  subtotal_paise: number;
+  total_gst_paise: number;
+  cgst_paise: number;
+  sgst_paise: number;
+  igst_paise: number;
+  toll_paise: number;
+  parking_paise: number;
+  permit_paise: number;
+  fasttag_paise: number;
+  discount_paise: number;
+  grand_total_paise: number;
+  net_payable_paise: number; // mirrors the original invoice's frozen total — the reversal amount
+  credit_note_date: string; // YYYY-MM-DD, the cancellation date
+  reason: string;
+  amount_in_words: string | null;
+  pdf_url: string | null;
+  pdf_generated_at: string | null;
+  pdf_template_version: string | null;
+  pdf_file_size_bytes: number | null;
+  issued_by: string | null;
+  created_at: string;
+};
+
+// One entry from GET /customers/:id/invoiceable-trips — a lean
+// projection of trip_sheets, not the full TripSheetDetail shape.
+type InvoiceableTrip = {
+  id: string;
+  trip_sheet_number: string;
+  service_type: TripServiceType;
+  billing_mode: TripBillingMode;
+  trip_date: string;
+  snapshot_vehicle_number: string;
+  snapshot_vehicle_type: VehicleType;
+  total_km: number;
+  total_hours: number;
+  total_days: number;
+  base_amount_paise: number;
+  extras_amount_paise: number;
+  driver_batta_paise: number;
+  toll_paise: number;
+  parking_paise: number;
+  permit_paise: number;
+  fasttag_paise: number;
+  advance_paise: number;
+  subtotal_paise: number;
+  gross_paise: number;
+  net_payable_paise: number;
+  held_by_invoice_id: string | null;
+  created_at: string;
+};
+
+type InvoiceableTripsGroupSummary = {
+  count: number;
+  total_km: number;
+  total_subtotal_paise: number;
+  total_gross_paise: number;
+  total_net_payable_paise: number;
+};
+
+type InvoiceableTrips = {
+  customer: { id: string; name: string | null; company_name: string | null; customer_type: CustomerType; gstin: string | null; state_code: string | null; credit_days: number };
+  groups: {
+    LOCAL: { trips: InvoiceableTrip[]; summary: InvoiceableTripsGroupSummary };
+    OUTSTATION: { trips: InvoiceableTrip[]; summary: InvoiceableTripsGroupSummary };
+  };
+  total_summary: InvoiceableTripsGroupSummary;
+};
+
+type PaymentMode = "CASH" | "UPI" | "NEFT" | "RTGS" | "IMPS" | "CHEQUE" | "CARD" | "BANK_TRANSFER";
+type PaymentStatus = "RECORDED" | "CANCELLED";
+
+type Payment = {
+  id: string;
+  tenant_id: string;
+  customer_id: string;
+  invoice_id: string | null; // null = unallocated advance
+  parent_payment_id: string | null; // set on a split spillover or a partial advance application
+  amount_paise: number; // always > 0
+  payment_mode: PaymentMode;
+  reference_number: string | null; // null only for CASH
+  received_at: string;
+  status: PaymentStatus;
+  notes: string | null;
+  recorded_by: string | null;
+  created_at: string;
+  updated_at: string;
+  cancelled_at: string | null;
+  cancelled_by: string | null;
+  cancellation_reason: string | null;
+};
+
+type CustomerLedgerEntry =
+  | { type: "INVOICE"; invoice_id: string; invoice_number: string; invoice_date: string; due_date: string; debit_paise: number; status: InvoiceStatus; running_balance_paise: number }
+  | { type: "PAYMENT"; payment_id: string; invoice_id: string | null; received_at: string; credit_paise: number; payment_mode: PaymentMode; reference_number: string | null; running_balance_paise: number };
+
+type CustomerLedger = {
+  customer: { id: string; customer_type: CustomerType; name: string | null; company_name: string | null; gstin: string | null; state_code: string | null; credit_days: number };
+  summary: {
+    total_invoiced_paise: number;
+    total_paid_paise: number;
+    total_cancelled_paise: number;
+    unallocated_advance_paise: number;
+    outstanding_paise: number;
+  };
+  entries: CustomerLedgerEntry[];
+};
+
+type AgingBucketName = "CURRENT" | "DAYS_1_30" | "DAYS_31_60" | "DAYS_61_90" | "DAYS_90_PLUS";
+
+type AgingEntry = {
+  invoice_id: string;
+  invoice_number: string;
+  customer_id: string;
+  customer_name: string | null;
+  due_date: string;
+  net_payable_paise: number;
+  paid_paise: number;
+  outstanding_paise: number;
+  days_overdue: number;
+};
+
+type ReceivablesAgingReport = {
+  as_of_date: string;
+  summary: {
+    total_outstanding_paise: number;
+    total_invoices: number;
+    buckets_summary: Record<AgingBucketName, { count: number; total_paise: number }>;
+  };
+  buckets: Record<AgingBucketName, { count: number; total_paise: number; entries: AgingEntry[] }>;
+};
 ```
 
 ## 7. Money handling
@@ -479,7 +755,7 @@ Every monetary field on the wire is one of two conventions: `*_paise` (integer, 
 
 ## 8. Pagination
 
-Every list endpoint (`GET /vehicles`, `/drivers`, `/customers`, `/pricing/rules`, `/trips`, `/users`) uses offset/limit:
+Every list endpoint (`GET /vehicles`, `/drivers`, `/customers`, `/pricing/rules`, `/trips`, `/users`, `/payments`, `/credit-notes`) uses offset/limit:
 
 ```
 GET /trips?limit=25&offset=50
@@ -491,7 +767,7 @@ Response includes:
 { "pagination": { "total": 143, "limit": 25, "offset": 50, "has_more": true } }
 ```
 
-Note: Module 2's list endpoints (`vehicles`, `drivers`, `customers`, `pricing/rules`, `users`) return `pagination: { total, limit, offset }` **without** `has_more` — computing it client-side is `offset + <items returned> < total`. `GET /trips` is the one endpoint that includes `has_more` directly in the response. The performance-sheet endpoints have no pagination at all — they return the full filtered/grouped set, capped at 10,000 rows (`EXPORT_TOO_LARGE` beyond that).
+Note: Module 2's list endpoints (`vehicles`, `drivers`, `customers`, `pricing/rules`, `users`) return `pagination: { total, limit, offset }` **without** `has_more` — computing it client-side is `offset + <items returned> < total`. `GET /trips`, `GET /payments`, and `GET /credit-notes` all include `has_more` directly in the response. The performance-sheet endpoints have no pagination at all — they return the full filtered/grouped set, capped at 10,000 rows (`EXPORT_TOO_LARGE` beyond that).
 
 ## 9. Filter conventions
 
@@ -522,6 +798,24 @@ Note: Module 2's list endpoints (`vehicles`, `drivers`, `customers`, `pricing/ru
 | `GSTIN_STATE_MISMATCH` | Highlight both the GSTIN and state fields; `details.gstin_state` names what the GSTIN actually encodes |
 | `*_ALREADY_EXISTS` (vehicle/driver/customer number/phone/gstin) | Offer to navigate to the existing record instead of retrying the create |
 | `*_ARCHIVED_EXISTS` | Offer an "unarchive instead" action, pointing at the id in `details` |
+| `INVOICE_NOT_FOUND` | 404 — treat like any other not-found; the id doesn't exist or belongs to a different tenant |
+| `INVOICE_NOT_EDITABLE` | Disable the edit form, show the invoice read-only, surface `details.current_status` |
+| `TRIP_ALREADY_HELD` | Explain the trip is already on another DRAFT invoice (`details.held_by_invoice_id`); offer to navigate there or pick a different trip |
+| `TRIP_ALREADY_ON_INVOICE` | Should not occur given the picker already excludes held trips — treat as an unexpected-state reload prompt if seen |
+| `CUSTOMER_MISMATCH` | Every trip on one invoice must belong to the same customer — surface which trip (`details.trip_id`) doesn't match |
+| `TRIP_NOT_FINALIZED` | The trip isn't ready to invoice yet; `details.current_status` names its actual status — finalize it first |
+| `INVALID_INVOICE_STATE_TRANSITION` | Reload the invoice's current state; `details.allowed_transitions` lists what's actually available from here |
+| `INVOICE_HAS_NO_LINES` | Should not occur for a normally-created invoice — reload and retry PDF generation |
+| `INVOICE_NOT_ISSUED` | PDF generation was attempted on a DRAFT — issue the invoice first |
+| `PDF_NOT_GENERATED` | Prompt to generate the PDF (`POST .../pdf`) before offering a download link |
+| `PDF_FILE_MISSING` | A 500 — the PDF was generated once but the file is gone server-side; regenerating (`POST .../pdf` again) is the fix, since generation is idempotent |
+| `PDF_RENDER_FAILED` | A 500 — offer a retry; this is a transient rendering failure, not a data problem |
+| `PAYMENT_REFERENCE_DUPLICATE` | This reference number is already recorded as an active payment for this mode — check whether it was already entered before retrying |
+| `PAYMENT_NOT_ALLOWED_STATE` | The invoice isn't ISSUED/PAID yet (or is CANCELLED) — `details.current_status` names it; payments can't be recorded against a DRAFT |
+| `PAYMENT_ALREADY_CANCELLED` | Reload — someone else already cancelled this payment |
+| `ADVANCE_CUSTOMER_MISMATCH` | The chosen advance belongs to a different customer than the invoice — only same-customer advances can be applied |
+| `INVOICE_ALREADY_FULLY_PAID` | Nothing left to apply an advance toward — the advance remains available for a different invoice |
+| `B2B_REQUIRED_FIELDS` | On `POST /customers/quick-create`: a B2B customer without a GSTIN was rejected — this is a hard database constraint, not something quick-create can waive; prompt for a GSTIN or use B2C |
 
 ## 11. Gotchas that will save days
 
@@ -533,6 +827,14 @@ Note: Module 2's list endpoints (`vehicles`, `drivers`, `customers`, `pricing/ru
 - CSV downloads (`GET /trips/performance-sheet/export.csv`) carry `X-Row-Count` and `X-Group-Count` response headers — read them for a "showing N rows across M customers" message instead of parsing the CSV body client-side to count.
 - GSTIN's state cross-check happens server-side (`GSTIN_STATE_MISMATCH`); the UI should still validate the format (`^[0-9A-Z]{15}$`) locally to fail fast before a round trip.
 - `includeArchived`/`includeCancelled` default to `false` everywhere they exist; an explicit `status` filter on `GET /trips` (or the performance sheet) always overrides `includeCancelled`, in both directions.
+- Invoice numbers are gap-free per fiscal year, per invoice type, per tenant (Indian GST requirement) — never cache or predict the next number client-side; a DRAFT invoice has `invoice_number: null` and only gets a real one at `POST .../issue`.
+- `tenant_snapshot`/`customer_snapshot` on an ISSUED/PAID/CANCELLED invoice (and both snapshot fields on a credit note) are IMMUTABLE, frozen at the moment of issue/cancellation. There is no "refresh from current customer/tenant info" endpoint and none should be built — a legal document's own copy of who it was billed to/from is not supposed to change after the fact, even if the live customer or tenant record is edited later.
+- PDF generation (`POST .../pdf`, both invoices and credit notes) is idempotent — safe to call again; it overwrites the same file and just updates `pdf_generated_at`/`pdf_file_size_bytes`. There's no need to guard against double-clicking a "Generate PDF" button.
+- Payments cancel, they don't delete — there is no `DELETE /payments/:id`. `POST /payments/:id/cancel` is the only reversal path and always requires a reason.
+- An over-payment on an invoice auto-splits: the outstanding portion applies to the invoice, the excess becomes a brand-new unallocated advance on the same customer (linked via `parent_payment_id`). The response's `spillover_advance` names it — surface both the applied payment AND the new advance to the user, not just the applied portion.
+- Advance application supports partial consumption — applying part of one advance to an invoice leaves the remainder (a decremented, still-active `payments` row) available to apply again, to a different invoice. A UI offering "apply this advance" should expect to potentially call the endpoint more than once against the same advance id over its lifetime.
+- `reports:read` includes `viewer` as of Task 4.6 (previously accountant-and-above only) — a read-only user CAN see the receivables aging report; don't gate that screen more strictly than the API actually requires.
+- There is no `GET /invoices` list/search endpoint — don't build an "all invoices" browse screen against this API yet; only single-invoice fetch (`GET /invoices/:id`) exists.
 
 ## 12. Local development
 
@@ -555,6 +857,6 @@ curl -X POST http://localhost:8000/api/v1/auth/login \
 
 The `scripts/verify-*.sh` files in this repo build much larger fixture sets (vehicles, drivers, customers, pricing rules, trips) the same way, with real request bodies — they're a good source of realistic example payloads for every endpoint if a specific request shape is unclear.
 
-## 14. Modules 1-3 are stable; Module 4 is not built yet
+## 14. Modules 1-4 are stable and complete
 
-Modules 1-3's API surface is considered stable — any breaking change to an existing endpoint's shape would go through a new `/v2` path rather than changing what's documented here in place. Module 4 (invoicing, GST computation, payments) has not been built: the trip lifecycle already has an `INVOICED` status and a service-only `markTripInvoiced` function reserved for it, but no route exposes it, and nothing about invoices, payment recording, or GST line-item computation exists yet. Do not build invoice or payment UI against this API today — those endpoints don't exist, and their eventual shape isn't committed to anything documented here.
+Modules 1-4's API surface is considered stable — any breaking change to an existing endpoint's shape would go through a new `/v2` path rather than changing what's documented here in place. Module 4 (invoicing, GST computation, payments, PDF rendering) is complete: invoice drafting/lifecycle/numbering, payment recording/advances/cancellation, the customer ledger, the receivables aging report, and PDF generation for both invoices and credit notes are all built and documented above. The one explicitly-known gap is invoice listing/search (`GET /invoices` doesn't exist — only single-invoice fetch) — see `docs/modules/module-4-invoices/known-issues.md`. Module 5 has not been started.
