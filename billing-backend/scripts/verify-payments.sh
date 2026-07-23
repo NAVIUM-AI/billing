@@ -54,7 +54,7 @@ RESET=$'\033[0m'
 
 PASS=0
 FAIL=0
-TOTAL_CHECKS=32
+TOTAL_CHECKS=33
 FAILED_STEPS=()
 
 pass() {
@@ -606,6 +606,15 @@ if [ "$(echo "$STEP24_RESP" | jq -r '.error.code')" = "FORBIDDEN" ] && [ "$(echo
   pass "Staff cannot access reports (reports:read excludes staff): 403 FORBIDDEN (required=reports:read)"
 else
   fail "Staff reports forbidden (Step 24)" "$(echo "$STEP24_RESP" | jq -c '.error')"
+fi
+
+# ─── Step 24b: viewer CAN access reports (Task 4.6 — reports:read widened) ───
+STEP24B_STATUS=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/reports/receivables-aging" -H "Authorization: Bearer $VIEWER_A_TOKEN")
+
+if [ "$STEP24B_STATUS" = "200" ]; then
+  pass "Viewer can access receivables aging report (reports:read widened in Task 4.6): 200"
+else
+  fail "Viewer reports access (Step 24b)" "got '$STEP24B_STATUS'"
 fi
 
 # ─── Step 25: cross-tenant isolation on payments ───

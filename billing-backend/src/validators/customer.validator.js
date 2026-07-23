@@ -148,6 +148,30 @@ const updateCustomerSchema = Joi.object({
     "object.min": "Provide at least one field to update.",
   });
 
+// Task 4.6: POST /customers/quick-create — a minimal-field variant for
+// an inline "new customer" modal during trip/invoice creation. Unlike
+// createCustomerSchema, gstin is optional even for B2B here (some B2B
+// clients don't have GSTIN registration yet, and the frontend flow
+// this serves needs to succeed without one) — the stricter
+// B2B_REQUIRED_FIELDS check createCustomer.service.js enforces does
+// NOT apply to this path; see customer.service.js#quickCreateCustomer.
+const quickCreateCustomerSchema = Joi.object({
+  customer_type: Joi.string()
+    .valid(...CUSTOMER_TYPES)
+    .required(),
+  // Used as both the B2C display name and, when company_name is
+  // omitted, the B2B company_name default — see quickCreateCustomer.
+  name: Joi.string().trim().min(2).max(255).required(),
+  company_name: Joi.string().trim().min(2).max(255),
+  gstin: gstinField,
+  phone: phoneField,
+  email: Joi.string().email().lowercase().trim(),
+})
+  .unknown(false)
+  .messages({
+    "any.unknown": "Only customer_type, name, company_name, gstin, phone, and email are accepted here.",
+  });
+
 const listCustomersQuerySchema = Joi.object({
   limit: Joi.number().integer().min(1).max(100).default(50),
   offset: Joi.number().integer().min(0).default(0),
@@ -184,6 +208,7 @@ module.exports = {
   CUSTOMER_TYPES,
   createCustomerSchema,
   updateCustomerSchema,
+  quickCreateCustomerSchema,
   listCustomersQuerySchema,
   getCustomerQuerySchema,
   createContactSchema,
