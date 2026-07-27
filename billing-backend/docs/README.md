@@ -1,6 +1,6 @@
 # Billing Backend — Engineering Documentation
 
-_Last updated: 2026-07-19. Reviewers: TBD._
+_Last updated: 2026-07-23. Reviewers: TBD._
 
 ## About this documentation
 
@@ -8,7 +8,7 @@ This is the engineering documentation for the billing backend, organized by modu
 
 ## Reading order for new engineers
 
-Start with [`frontend-readiness.md`](frontend-readiness.md) for a fast, practical overview of the whole system's surface — base URL, auth flow, permission model, every endpoint, and TypeScript types — even if you're not building a frontend, it's the quickest way to see the shape of the whole API in one file. Then read a module's `00-overview.md` to understand what it does and where it sits in the system, followed by `01-planning-context.md` for why it exists in its current shape. From there, `02-architecture.md` and `03-database-schema.md` give the structural picture, `04-api-reference.md` is the contract you'll actually code against, and `05-design-decisions.md` explains the trade-offs so you don't accidentally "fix" something that was deliberate. `06-error-reference.md`, `07-debugging-playbook.md`, and `08-verification.md` are the ones you'll come back to repeatedly once you're actively building on the module. The ADRs in `adr/` are worth skimming once — they capture decisions (native enums, money-as-paise, forced RLS, normalize-in-service, versioned pricing, domain-error translation, selective 5xx masking, why auth tables skip RLS) that apply across every module, not just the one that introduced them.
+Start with [`frontend-readiness.md`](frontend-readiness.md) for a fast, practical overview of the whole system's surface — base URL, auth flow, permission model, every endpoint, and TypeScript types — even if you're not building a frontend, it's the quickest way to see the shape of the whole API in one file. Then read a module's `00-overview.md` to understand what it does and where it sits in the system, followed by `01-planning-context.md` for why it exists in its current shape. From there, `02-architecture.md` and `03-database-schema.md` give the structural picture, `04-api-reference.md` is the contract you'll actually code against, and `05-design-decisions.md` explains the trade-offs so you don't accidentally "fix" something that was deliberate. `06-error-reference.md`, `07-debugging-playbook.md`, and `08-verification.md` are the ones you'll come back to repeatedly once you're actively building on the module. The ADRs in `adr/` are worth skimming once — they capture decisions (native enums, money-as-paise, forced RLS, normalize-in-service, versioned pricing, domain-error translation, selective 5xx masking, why auth tables skip RLS, the BIGINT type-parser fix, invoice-lines-vs-reimbursements, correlated-subquery bound params, dedicated reversal functions, synthetic-payment-reference uniqueness, specs-vs-actual-schema, visual review for rendered documents) that apply across every module, not just the one that introduced them.
 
 ## Module docs
 
@@ -17,7 +17,8 @@ Start with [`frontend-readiness.md`](frontend-readiness.md) for a fast, practica
 | Module 1: Auth & Tenancy | Signup/login, JWT + refresh tokens, RBAC, tenant isolation (RLS) | TODO — not yet written |
 | Module 2: Master Data Management | Vehicles, drivers, customers, pricing rules | [Complete](modules/module-2-master-data/00-overview.md) |
 | Module 3: Trip Sheets | Trip creation (local + outstation), lifecycle state machine, listing + aggregates, performance sheets | [Complete](modules/module-3-trip-sheets/00-overview.md) |
-| Module 4: Invoicing & GST | TODO | Not started |
+| Module 4: Invoices | Invoice lifecycle, GST computation, payments/receivables, PDF rendering | [Complete](modules/module-4-invoices/00-overview.md) |
+| Module 5: (planned) | Not started | — |
 
 ## Cross-cutting docs
 

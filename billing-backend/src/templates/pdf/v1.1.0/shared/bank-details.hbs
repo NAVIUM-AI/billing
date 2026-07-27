@@ -1,0 +1,24 @@
+<div class="footer-wrap">
+  <div class="footer-left">
+    <div class="footer-left-title">Bank Details</div>
+    <div class="footer-left-content">
+      {{#if tenant.bank_details}}
+        {{#if tenant.bank_details.account_name}}A/c Name: {{tenant.bank_details.account_name}}<br>{{/if}}
+        {{#if tenant.bank_details.account_number}}A/c No: {{tenant.bank_details.account_number}}<br>{{/if}}
+        {{#if tenant.bank_details.bank_name}}Bank: {{tenant.bank_details.bank_name}}{{#if tenant.bank_details.branch}}, {{tenant.bank_details.branch}}{{/if}}<br>{{/if}}
+        {{#if tenant.bank_details.ifsc}}IFSC: {{tenant.bank_details.ifsc}}<br>{{/if}}
+        {{#if tenant.bank_details.upi_id}}UPI: {{tenant.bank_details.upi_id}}{{/if}}
+      {{else}}
+        (Bank details not configured)
+      {{/if}}
+    </div>
+  </div>
+  <div class="footer-right">
+    <div class="footer-right-name">
+      For {{tenant.name}}
+    </div>
+    <div class="footer-right-signature">
+      Authorised Signatory
+    </div>
+  </div>
+</div>

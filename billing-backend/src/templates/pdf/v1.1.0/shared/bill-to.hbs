@@ -1,0 +1,60 @@
+<div class="info-blocks">
+  <div class="info-block">
+    <div class="info-block-title">Bill To</div>
+    <div class="info-block-content">
+      <div class="customer-name">
+        {{#if customer.company_name}}{{customer.company_name}}{{else}}{{customer.name}}{{/if}}
+      </div>
+      {{#if customer.address_line1}}
+      <div>{{customer.address_line1}}{{#if customer.address_line2}}, {{customer.address_line2}}{{/if}}</div>
+      {{/if}}
+      {{#if customer.city}}
+      <div>{{customer.city}}{{#if customer.pincode}} - {{customer.pincode}}{{/if}}{{#if customer.state}}, {{customer.state}}{{/if}}</div>
+      {{/if}}
+      {{! Task 4.7: B2C hides GSTIN + State. Switching on GSTIN presence
+          (not customer_type) because snapshots are immutable per
+          ADR-014 and any GSTIN captured at issue-time belongs on the
+          historical invoice regardless of what the customer looks
+          like today. }}
+      {{#if customer.gstin}}
+      <div>GSTIN: {{customer.gstin}}{{#if customer.state_name}} | State: {{customer.state_name}} ({{customer.state_code}}){{/if}}</div>
+      {{/if}}
+      {{#if customer.phone}}
+      <div>Contact: {{customer.phone}}{{#if customer.email}} / {{customer.email}}{{/if}}</div>
+      {{/if}}
+    </div>
+  </div>
+  <div class="info-block">
+    <div class="info-block-title">Service Details</div>
+    <div class="info-block-content">
+      <div>
+        <span class="label">Nature of Supply:</span>
+        {{natureOfSupply}}
+      </div>
+      {{#if sacCode}}
+      <div>
+        <span class="label">SAC Code:</span>
+        {{sacCode}}
+      </div>
+      {{/if}}
+      {{#if billingCycle}}
+      <div>
+        <span class="label">Billing Cycle:</span>
+        {{formatDate billingCycle.from}} to {{formatDate billingCycle.to}}
+      </div>
+      {{/if}}
+      {{#if bookedBy}}
+      <div>
+        <span class="label">Booked By:</span>
+        {{bookedBy}}
+      </div>
+      {{/if}}
+      {{#if customer.credit_days}}
+      <div>
+        <span class="label">Payment Terms:</span>
+        {{customer.credit_days}} days
+      </div>
+      {{/if}}
+    </div>
+  </div>
+</div>

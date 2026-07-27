@@ -15,6 +15,7 @@ const validate = require("../../middleware/validate");
 const {
   createCustomerSchema,
   updateCustomerSchema,
+  quickCreateCustomerSchema,
   listCustomersQuerySchema,
   getCustomerQuerySchema,
   createContactSchema,
@@ -51,6 +52,27 @@ router.post(
   validate(createCustomerSchema),
   async (req, res) => {
     const customer = await customerService.createCustomer(
+      req.tenantId,
+      req.body,
+      req.user.userId,
+      req.db,
+    );
+    res.status(201).json({ customer });
+  },
+);
+
+// Task 4.6: minimal-field variant of POST / for an inline "new
+// customer" modal during trip/invoice creation. Registered ahead of
+// GET /:customerId so the literal path reads clearly next to the
+// parameterized one — same convention as pricing.routes.js's
+// /rules/applicable — though POST has no actual collision risk here
+// since the only other POST route at this level is the exact path "/".
+router.post(
+  "/quick-create",
+  requirePermission("customers:write"),
+  validate(quickCreateCustomerSchema),
+  async (req, res) => {
+    const customer = await customerService.quickCreateCustomer(
       req.tenantId,
       req.body,
       req.user.userId,

@@ -27,7 +27,8 @@
     "verify:invoice-picker": "bash scripts/verify-invoice-picker.sh",
     "verify:invoice-lifecycle": "bash scripts/verify-invoice-lifecycle.sh",
     "verify:payments": "bash scripts/verify-payments.sh",
-    "verify:pdf": "bash scripts/verify-pdf.sh"
+    "verify:pdf": "bash scripts/verify-pdf.sh",
+    "verify:customer-quick": "bash scripts/verify-customer-quick-create.sh"
   },
   "keywords": [],
   "author": "",

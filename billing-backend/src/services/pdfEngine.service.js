@@ -33,7 +33,7 @@ const templateCache = new Map();
 // invoice/credit note always uses the version stored on that record
 // (see pdf.service.js), never this current value, so historical
 // documents stay visually stable even after this bumps.
-const TEMPLATE_VERSION = "v1.0.0";
+const TEMPLATE_VERSION = "v1.1.0";
 
 // Common install locations for an already-present Chrome/Chromium,
 // checked in order. CHROME_EXECUTABLE_PATH always wins when set (e.g.
