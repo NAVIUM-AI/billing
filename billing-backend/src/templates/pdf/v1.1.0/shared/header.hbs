@@ -1,0 +1,49 @@
+<div class="header-wrap">
+  <div class="header-left">
+    <div class="header-logo">
+      {{#if tenant.logo_initials}}{{tenant.logo_initials}}{{else}}P{{/if}}
+    </div>
+    <div>
+      <div class="header-tenant-name">{{tenant.name}}</div>
+      {{! Task 4.7: Proforma invoices omit the tenant's own
+          GSTIN/PAN/State — they aren't tax documents, so this
+          identity/registration block has no purpose there. Callers
+          pass hideTenantTaxInfo=true (see invoice-proforma-*.hbs). }}
+      {{#unless hideTenantTaxInfo}}
+      <div class="header-tenant-address">
+        {{#if tenant.gstin}}GSTIN: {{tenant.gstin}}{{/if}}
+        {{#if tenant.pan}} | PAN: {{tenant.pan}}{{/if}}
+        {{#if tenant.state_name}}<br>State: {{tenant.state_name}} ({{tenant.state_code}}){{/if}}
+      </div>
+      {{/unless}}
+    </div>
+  </div>
+  <div class="header-right">
+    <div class="header-doc-title">{{docTitle}}</div>
+    <div class="header-doc-meta">
+      <div>
+        <span class="label">{{docNumberLabel}}:</span>
+        {{docNumber}}
+      </div>
+      <div>
+        <span class="label">{{docDateLabel}}:</span>
+        {{formatDate docDate}}
+      </div>
+      {{! Task 4.7: gated on the same hideTenantTaxInfo flag as the
+          GSTIN/PAN/State block above — Place of Supply is a GST
+          concept and Proforma invoices aren't tax documents (Part B).
+          Without this, placeOfSupplyStateName/StateCode would still
+          render here even for Proforma templates that never pass
+          them, since Handlebars partials inherit the full parent
+          context, not just explicitly-passed hash arguments. }}
+      {{#if placeOfSupplyStateName}}
+      {{#unless hideTenantTaxInfo}}
+      <div>
+        <span class="label">Place of Supply:</span>
+        {{placeOfSupplyStateName}}{{#if placeOfSupplyStateCode}} ({{placeOfSupplyStateCode}}){{/if}}
+      </div>
+      {{/unless}}
+      {{/if}}
+    </div>
+  </div>
+</div>

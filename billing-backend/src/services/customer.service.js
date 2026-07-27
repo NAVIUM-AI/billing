@@ -124,6 +124,100 @@ async function createCustomer(tenantId, input, actorUserId, db) {
 }
 
 /**
+ * POST /customers/quick-create (Task 4.6) — a minimal-field variant of
+ * createCustomer for an inline "new customer" modal during trip/invoice
+ * creation. Reuses customerRepository.insert directly (the same
+ * insertion path createCustomer itself calls) rather than duplicating
+ * the INSERT SQL.
+ *
+ * ─── Flagged spec deviation: B2B still requires a GSTIN ───
+ * The Task 4.6 spec asked for gstin to be optional even for B2B here
+ * ("some B2B clients don't have GSTIN registration"), with this
+ * function skipping createCustomer's own B2B_REQUIRED_FIELDS
+ * application-layer check to allow it. That's only half the guard,
+ * though: `customers_b2b_required_fields` (Task 2.3) is a DATABASE
+ * CHECK constraint — `customer_type <> 'B2B' OR (company_name IS NOT
+ * NULL AND gstin IS NOT NULL AND state_code IS NOT NULL)` — completely
+ * independent of any application-layer check, and this task's own
+ * constraints explicitly rule out schema changes. Skipping the
+ * service-layer check therefore doesn't change the actual outcome: a
+ * B2B quick-create without a gstin still fails, just one layer lower,
+ * via the DB CHECK (translated by customer.repository.js's existing
+ * mapConstraintError into the same clean 400 B2B_REQUIRED_FIELDS this
+ * function would otherwise have thrown itself — no raw constraint
+ * violation reaches the client either way). What quick-create actually
+ * simplifies for B2B is the field list and the company-name default
+ * (below), not the GSTIN requirement itself, which remains a real,
+ * unbypassable invariant of this schema.
+ *
+ * @param {string} tenantId
+ * @param {object} input - validated quickCreateCustomerSchema output; input.phone is { canonical, display } or undefined
+ * @param {string} actorUserId
+ * @param {{ withTenantContext: Function }} db - req.db
+ * @returns {Promise<object>}
+ */
+async function quickCreateCustomer(tenantId, input, actorUserId, db) {
+  const phoneCanonical = input.phone ? input.phone.canonical : null;
+  const phoneDisplay = input.phone ? input.phone.display : null;
+  const gstin = input.gstin || null;
+
+  // Auto-derive state_code from the GSTIN when one is given — there is
+  // no state_code field on this schema at all (quick-create has no way
+  // to accept one directly), so a supplied GSTIN is the only source.
+  const stateCode = gstin ? gstinUtil.stateFromGstin(gstin) : null;
+
+  const companyName = input.customer_type === "B2B" ? input.company_name || input.name : null;
+
+  return db.withTenantContext(async (client) => {
+    // Same "nicer error on the archived case" pre-checks as
+    // createCustomer — a genuine active duplicate is still left to the
+    // unique constraint + repo.insert's own catch.
+    if (gstin) {
+      const existingByGstin = await customerRepository.findByGstin(tenantId, gstin, client);
+      if (existingByGstin && !existingByGstin.is_active) {
+        throw apiError(
+          409,
+          "CUSTOMER_ARCHIVED_EXISTS",
+          "A customer with this GSTIN exists but is archived. Reactivate it instead.",
+          { customerId: existingByGstin.id, reason: "gstin" },
+        );
+      }
+    }
+    if (phoneCanonical) {
+      const existingByPhone = await customerRepository.findByPhone(tenantId, phoneCanonical, client);
+      if (existingByPhone && !existingByPhone.is_active) {
+        throw apiError(
+          409,
+          "CUSTOMER_ARCHIVED_EXISTS",
+          "A customer with this phone exists but is archived. Reactivate it instead.",
+          { customerId: existingByPhone.id, reason: "phone" },
+        );
+      }
+    }
+
+    return customerRepository.insert(
+      tenantId,
+      {
+        customerType: input.customer_type,
+        name: input.name,
+        companyName,
+        gstin,
+        pan: null,
+        stateCode,
+        phoneCanonical,
+        phoneDisplay,
+        email: input.email || null,
+        address: {},
+        creditDays: 0,
+        notes: null,
+        createdBy: actorUserId,
+      },
+      client,
+    );
+  });
+}
+
+/**
  * @param {string} tenantId
  * @param {string} id
  * @param {{ withTenantContext: Function }} db
@@ -419,6 +513,7 @@ async function removeContact(tenantId, customerId, contactId, db) {
 
 module.exports = {
   createCustomer,
+  quickCreateCustomer,
   getCustomer,
   listCustomers,
   updateCustomer,
