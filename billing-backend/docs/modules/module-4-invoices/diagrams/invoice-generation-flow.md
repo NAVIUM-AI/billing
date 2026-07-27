@@ -53,11 +53,15 @@ The end-to-end path a real invoice takes, from an ops user picking a customer th
  5. The invoice now needs a PDF to actually send the customer
     │
     ▼
- POST /invoices/:id/pdf                                (Task 4.5, invoices:read)
-    │  Loads the invoice + lines, picks Yellow (LOCAL) /
-    │  Blue (OUTSTATION) / Performance template based on
-    │  invoice_type + the first line's service_type,
-    │  renders via Puppeteer + Handlebars using the
+ POST /invoices/:id/pdf                       (Task 4.5, invoices:read; split Task 4.7)
+    │  Loads the invoice + lines, picks Yellow (TAX/LOCAL) /
+    │  Blue (TAX/OUTSTATION) / Proforma Local / Proforma
+    │  Outstation template from a 2x2 (invoice_type x
+    │  service_type) map, keyed by the invoice's OWN stored
+    │  pdf_template_version so a re-render of an already-
+    │  issued document never silently changes layout after a
+    │  template version bump, renders via Puppeteer + Handlebars
+    │  using the
     │  FROZEN tenant_snapshot/customer_snapshot (never a
     │  fresh tenant/customer lookup), writes the file to
     │  PDF_STORAGE_ROOT, stores pdf_url/pdf_template_

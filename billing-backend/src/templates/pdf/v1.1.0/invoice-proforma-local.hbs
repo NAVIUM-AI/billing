@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  {{> "shared/styles"}}
+</head>
+<body>
+  <div class="page">
+    {{> "shared/header"
+       docTitle="PROFORMA INVOICE"
+       docNumberLabel="Invoice No"
+       docNumber=invoice.invoice_number
+       docDateLabel="Invoice Date"
+       docDate=invoice.invoice_date
+       hideTenantTaxInfo=true}}
+
+    {{> "shared/bill-to"
+       natureOfSupply="Rental Services of Motor Vehicle (Local Use)"
+       billingCycle=billingCycle}}
+
+    <table class="lines-table">
+      <thead>
+        <tr>
+          <th>Sl<br>No</th>
+          <th>Date</th>
+          <th>Vehicle<br>Number</th>
+          <th>Vehicle<br>Type</th>
+          <th>Trip Sheet<br>Number</th>
+          <th>8Hrs/80Km<br>Rs</th>
+          <th>Extra<br>KM</th>
+          <th>Per KM<br>Cost</th>
+          <th>Extra KM<br>Cost</th>
+          <th>Extra<br>Hrs</th>
+          <th>Extra Hrs<br>Cost</th>
+          <th>Total Extra<br>Cost</th>
+          <th>Total<br>Amount</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{#each lines}}
+        <tr>
+          <td class="text-center">{{line_number}}</td>
+          <td class="text-center">{{formatDate trip_date}}</td>
+          <td class="text-center">{{vehicle_number}}</td>
+          <td class="text-center">{{vehicle_type_label}}</td>
+          <td class="text-center">{{trip_sheet_number}}</td>
+          <td class="text-right">{{formatMoneyBare base_amount_paise}}</td>
+          <td class="text-center">{{extra_km}}</td>
+          <td class="text-right">{{formatMoneyBare extra_km_rate_paise}}</td>
+          <td class="text-right">{{formatMoneyBare extra_km_amount_paise}}</td>
+          <td class="text-center">{{extra_hrs}}</td>
+          <td class="text-right">{{formatMoneyBare extra_hrs_amount_paise}}</td>
+          <td class="text-right">{{formatMoneyBare extras_amount_paise}}</td>
+          <td class="text-right">{{formatMoneyBare line_amount_paise}}</td>
+        </tr>
+        {{/each}}
+      </tbody>
+      <tfoot>
+        <tr>
+          <td colspan="12" class="text-right">Total</td>
+          <td class="text-right">{{formatMoneyBare subtotal_paise}}</td>
+        </tr>
+      </tfoot>
+    </table>
+
+    <div class="totals-wrap">
+      <div class="totals-left">
+        <div class="totals-left-title">Amount in Words:</div>
+        <div class="totals-left-value">{{amount_in_words}}</div>
+      </div>
+      <div class="totals-right">
+        <div class="totals-right-row">
+          <div class="totals-right-label">Trip Amount</div>
+          <div class="totals-right-value">{{formatMoneyBare trip_amount_paise}}</div>
+        </div>
+        <div class="totals-right-row">
+          <div class="totals-right-label">Total Extra Cost</div>
+          <div class="totals-right-value">{{formatMoneyBare total_extra_cost_paise}}</div>
+        </div>
+        {{#if (gt discount_paise 0)}}
+        <div class="totals-right-row">
+          <div class="totals-right-label">Discount</div>
+          <div class="totals-right-value">-{{formatMoneyBare discount_paise}}</div>
+        </div>
+        {{/if}}
+        <div class="totals-right-row grand">
+          <div class="totals-right-label">Net Payable</div>
+          <div class="totals-right-value">{{formatMoney net_payable_paise}}</div>
+        </div>
+      </div>
+    </div>
+
+    {{> "shared/bank-details"}}
+
+    <div class="compliance-note">
+      This is a Proforma Invoice and not a demand for payment. Thank
+      you for your business. We do expect payment within or before due
+      date, so please process this invoice within that time.
+      Clarification if any, on this Bill / Tripsheet must be sought
+      for within 7 days from the date of submission. E.&amp;O.E.
+    </div>
+  </div>
+</body>
+</html>

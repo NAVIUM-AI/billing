@@ -101,11 +101,35 @@ async function listByInvoice(tenantId, invoiceId, client) {
 }
 
 /**
- * Same rows as listByInvoice, plus the parent trip sheet's
- * trip_sheet_number — invoice_lines only stores trip_sheet_id (Task
- * 4.1), but the PDF layout (Task 4.5) shows the human-readable sheet
- * number, so this joins in exactly that one extra column rather than
- * denormalizing it onto invoice_lines itself.
+ * Same rows as listByInvoice, plus a handful of columns from the
+ * parent trip sheet that the PDF layout needs but invoice_lines never
+ * denormalized onto itself:
+ *   - trip_sheet_number (Task 4.5) — the human-readable sheet number.
+ *   - snap_base_km/snap_base_hours/snap_extra_km_rate_paise/
+ *     snap_extra_hr_rate_paise (Task 4.7) — the LOCAL_PACKAGE rule
+ *     snapshot already frozen onto the trip at creation (Task 3.x).
+ *     invoice_lines.extras_amount_paise only stores the combined
+ *     extra-KM + extra-hours amount; these let the PDF re-derive the
+ *     same split the original calculator (src/domain/pricing/local.js)
+ *     produced, without re-running any pricing logic here.
+ *   - snap_slab_rate_paise (Task 4.7) — the OUTSTATION_SLAB rate,
+ *     shown as-is instead of back-deriving base_amount_paise/total_km
+ *     (which drifts from the true rate whenever min_km_per_day floors
+ *     billable_km above actual total_km).
+ *   - toll_paise (Task 4.7) — per-trip toll, real column on
+ *     trip_sheets, currently only ever summed at the invoice level
+ *     (invoices.toll_paise). Reference invoices (PTT-150/151) show a
+ *     per-line Toll/Parking column, which this makes possible without
+ *     inventing any figure that isn't already stored.
+ *   - parking_paise (Task 4.7) — same reasoning, combined with
+ *     toll_paise into the LOCAL template's single "Toll / Parking"
+ *     column (matching PTT-150's exact column label).
+ *   - booked_by (Task 4.7) — real, user-settable field
+ *     (tripSheet.validator.js), shown in the Service Details block.
+ *
+ * None of this is a schema change — every one of these columns already
+ * existed on trip_sheets; this just widens the JOIN that already
+ * existed for trip_sheet_number.
  *
  * @param {string} tenantId
  * @param {string} invoiceId
@@ -114,7 +138,11 @@ async function listByInvoice(tenantId, invoiceId, client) {
  */
 async function listByInvoiceForPdf(tenantId, invoiceId, client) {
   const result = await client.query(
-    `SELECT il.*, ts.trip_sheet_number
+    `SELECT il.*, ts.trip_sheet_number, ts.booked_by,
+            ts.snap_base_km, ts.snap_base_hours,
+            ts.snap_extra_km_rate_paise, ts.snap_extra_hr_rate_paise,
+            ts.snap_slab_rate_paise,
+            ts.toll_paise, ts.parking_paise
      FROM invoice_lines il
      JOIN trip_sheets ts ON ts.id = il.trip_sheet_id AND ts.tenant_id = il.tenant_id
      WHERE il.invoice_id = $1 AND il.tenant_id = $2
