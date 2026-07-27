@@ -45,7 +45,7 @@ There is no `GET /invoices` list endpoint in this module — invoice listing/sea
 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
-| `invoice_type` | string | yes | `TAX` or `PERFORMANCE` |
+| `invoice_type` | string | yes | `TAX` or `PERFORMANCE`. The DB enum value stays `PERFORMANCE` (renaming it would need a migration + backfill); since Task 4.7 it's rendered on PDFs and should be referred to in UI copy as "Proforma," not "Performance" |
 | `customer_id` | UUID | yes | Must be an active customer |
 | `trip_sheet_ids` | array of UUID | yes | `min(1)`, `max(50)`. Every trip must be `FINALIZED`, unheld (or held by no invoice yet), and belong to `customer_id` |
 | `invoice_date` | string | no | `YYYY-MM-DD`; defaults to today; cannot be future or more than 30 days past |

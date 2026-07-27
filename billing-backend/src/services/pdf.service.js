@@ -90,27 +90,94 @@ async function ensurePartialsLoaded(version) {
 }
 
 /**
- * Yellow (LOCAL tax), Blue (OUTSTATION tax), or Performance. TAX
- * invoices are guaranteed single-service_type by Task 4.3's own
+ * Yellow (LOCAL tax), Blue (OUTSTATION tax), or — since Task 4.7 split
+ * the single "Performance" template in two — Proforma Local/Outstation.
+ * TAX invoices are guaranteed single-service_type by Task 4.3's own
  * validation, so the first line's service_type is authoritative for
- * the whole invoice.
+ * the whole invoice. invoice_type stays 'PERFORMANCE' in the DB enum
+ * (renaming it to PROFORMA would need a migration + backfill, out of
+ * scope for Task 4.7); "Proforma" is a user-facing label/template
+ * choice only.
+ *
+ * Keyed by template version, not just invoice_type/service_type,
+ * because v1.0.0 never split Performance by service_type — a PDF
+ * regenerated for an invoice whose pdf_template_version is still
+ * 'v1.0.0' (Task 4.7 ADR: template versioning) must keep resolving to
+ * the single invoice-performance.hbs it originally rendered with, not
+ * the new split template, or a historical document's layout would
+ * silently change on re-generation.
  */
-function pickInvoiceTemplateName(invoice, lines) {
-  if (invoice.invoice_type === "PERFORMANCE") {
-    return "invoice-performance";
-  }
+const TEMPLATE_MAP = {
+  "v1.0.0": {
+    "TAX:LOCAL": "invoice-local-tax",
+    "TAX:OUTSTATION": "invoice-outstation-tax",
+    "PERFORMANCE:LOCAL": "invoice-performance",
+    "PERFORMANCE:OUTSTATION": "invoice-performance",
+  },
+  "v1.1.0": {
+    "TAX:LOCAL": "invoice-local-tax",
+    "TAX:OUTSTATION": "invoice-outstation-tax",
+    "PERFORMANCE:LOCAL": "invoice-proforma-local",
+    "PERFORMANCE:OUTSTATION": "invoice-proforma-outstation",
+  },
+};
+
+function pickInvoiceTemplateName(invoice, lines, templateVersion) {
   const firstLine = lines[0];
   if (!firstLine) {
     throw apiError(400, "INVOICE_HAS_NO_LINES", "Cannot generate a PDF for an invoice with no lines.");
   }
-  return firstLine.service_type === "LOCAL" ? "invoice-local-tax" : "invoice-outstation-tax";
+  const versionMap = TEMPLATE_MAP[templateVersion];
+  if (!versionMap) {
+    throw apiError(500, "PDF_TEMPLATE_ERROR", `No template map defined for version ${templateVersion}.`);
+  }
+  const key = `${invoice.invoice_type}:${firstLine.service_type}`;
+  const templateFile = versionMap[key];
+  if (!templateFile) {
+    throw apiError(500, "PDF_TEMPLATE_ERROR", `No template for ${key} at ${templateVersion}.`);
+  }
+  return templateFile;
 }
 
+/**
+ * Task 4.7: derives the LOCAL extra-KM/extra-hours split and the
+ * OUTSTATION per-line toll/total-cost columns the reference invoices
+ * (PTT-150/151) show, from data listByInvoiceForPdf already joins in
+ * (see that function's comment) — none of this is fabricated, it's
+ * the same arithmetic src/domain/pricing/local.js itself used to
+ * produce extras_amount_paise, just re-expressed as its two addends
+ * instead of the stored combined sum.
+ */
 function enhanceLine(line) {
+  const extraKm = line.snap_base_km != null ? Math.max(0, Number(line.total_km) - Number(line.snap_base_km)) : null;
+  const extraHrs =
+    line.snap_base_hours != null ? Math.max(0, Number(line.total_hours) - Number(line.snap_base_hours)) : null;
+  const extraKmRatePaise = line.snap_extra_km_rate_paise != null ? Number(line.snap_extra_km_rate_paise) : null;
+  const extraHrRatePaise = line.snap_extra_hr_rate_paise != null ? Number(line.snap_extra_hr_rate_paise) : null;
+  const extraKmAmountPaise = extraKm != null && extraKmRatePaise != null ? extraKm * extraKmRatePaise : null;
+  const extraHrsAmountPaise = extraHrs != null && extraHrRatePaise != null ? extraHrs * extraHrRatePaise : null;
+  const tollPaise = Number(line.toll_paise || 0);
+  const parkingPaise = Number(line.parking_paise || 0);
+
+  const perKmRatePaise =
+    line.snap_slab_rate_paise != null
+      ? Number(line.snap_slab_rate_paise)
+      : line.total_km > 0
+        ? Math.round(Number(line.base_amount_paise) / line.total_km)
+        : 0;
+
   return {
     ...line,
     vehicle_type_label: humanizeVehicleType(line.vehicle_type),
-    per_km_rate_paise: line.total_km > 0 ? Math.round(Number(line.base_amount_paise) / line.total_km) : 0,
+    per_km_rate_paise: perKmRatePaise,
+    extra_km: extraKm,
+    extra_km_rate_paise: extraKmRatePaise,
+    extra_km_amount_paise: extraKmAmountPaise,
+    extra_hrs: extraHrs,
+    extra_hr_rate_paise: extraHrRatePaise,
+    extra_hrs_amount_paise: extraHrsAmountPaise,
+    toll_parking_paise: tollPaise + parkingPaise,
+    total_cost_paise: Number(line.line_amount_paise) + tollPaise,
   };
 }
 
@@ -152,13 +219,50 @@ function buildCustomerRenderContext(customerSnapshot) {
 function buildInvoiceRenderContext(invoice, lines, templateName) {
   const gstRate = invoice.gst_rate_snapshot != null ? Number(invoice.gst_rate_snapshot) : null;
   const customer = buildCustomerRenderContext(invoice.customer_snapshot);
+  const enhancedLines = lines.map(enhanceLine);
+
+  // Per-line "Toll / Parking" (LOCAL) and "Total Cost" (OUTSTATION)
+  // columns (Task 4.7, PTT-150/151 parity) are a display breakdown of
+  // real per-trip data, not a re-derivation of the invoice's own
+  // reimbursement/net-payable totals — the footer row under each of
+  // those columns sums the same per-line values shown above it, kept
+  // as its own total rather than reusing reimbursements_paise/
+  // net_payable_paise (which may include permit/fasttag that this
+  // column deliberately doesn't show, per PTT-151's own column set).
+  const tollParkingTotalPaise = enhancedLines.reduce((sum, l) => sum + l.toll_parking_paise, 0);
+  const tollTotalPaise = enhancedLines.reduce((sum, l) => sum + Number(l.toll_paise || 0), 0);
+  const totalCostTotalPaise = enhancedLines.reduce((sum, l) => sum + l.total_cost_paise, 0);
+
+  // Proforma (invoice_type PERFORMANCE) summary block (PTT-152 parity,
+  // Task 4.7): "Trip Amount" is the base/running cost only, "Total
+  // Extra Cost" is the extra-KM + extra-Hrs (LOCAL) or none
+  // (OUTSTATION has no "extra" concept) portion — split back out of
+  // subtotal_paise, which combines both.
+  const tripAmountPaise = enhancedLines.reduce((sum, l) => sum + Number(l.base_amount_paise), 0);
+  const totalExtraCostPaise = enhancedLines.reduce(
+    (sum, l) => sum + (l.extra_km_amount_paise || 0) + (l.extra_hrs_amount_paise || 0),
+    0,
+  );
+  const totalDriverBattaPaise = enhancedLines.reduce((sum, l) => sum + Number(l.driver_batta_paise || 0), 0);
 
   return {
     invoice,
     tenant: buildTenantRenderContext(invoice.tenant_snapshot),
     customer,
-    lines: lines.map(enhanceLine),
+    lines: enhancedLines,
     billingCycle: computeBillingCycle(lines),
+    // First line's trip is authoritative, same reasoning as
+    // pickInvoiceTemplateName's service_type read — an invoice's
+    // trips are always booked by the same person in practice, and
+    // booked_by is real, already-captured data (trip_sheets.booked_by,
+    // Task 3.x), just not previously plumbed through to the PDF.
+    bookedBy: lines[0] ? lines[0].booked_by : null,
+    toll_parking_total_paise: tollParkingTotalPaise,
+    toll_total_paise: tollTotalPaise,
+    total_cost_total_paise: totalCostTotalPaise,
+    trip_amount_paise: tripAmountPaise,
+    total_extra_cost_paise: totalExtraCostPaise,
+    total_driver_batta_paise: totalDriverBattaPaise,
     placeOfSupplyStateName: customer.state_name,
     placeOfSupplyStateCode: customer.state_code,
     subtotal_paise: invoice.subtotal_paise,
@@ -256,7 +360,7 @@ async function generateInvoicePdf(tenantId, invoiceId, db) {
 
     const lines = await invoiceLineRepo.listByInvoiceForPdf(tenantId, invoiceId, client);
     const templateVersion = invoice.pdf_template_version || pdfEngine.TEMPLATE_VERSION;
-    const templateName = pickInvoiceTemplateName(invoice, lines);
+    const templateName = pickInvoiceTemplateName(invoice, lines, templateVersion);
     const context = buildInvoiceRenderContext(invoice, lines, templateName);
 
     const pdfBuffer = await renderPdf(templateName, templateVersion, context);

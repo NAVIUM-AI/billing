@@ -10,6 +10,16 @@
 # do NOT assert specific byte content, since that's a Chromium-version
 # concern, not application logic.
 #
+# Task 4.7 adds the Proforma split (Performance -> Proforma Local /
+# Proforma Outstation) and the B2C GSTIN-hiding conditional. Those DO
+# assert specific text content via pdftotext, deliberately narrower
+# than Rule 11's byte-content exemption above — the whole point of
+# these checks is that a specific string (a column header, a
+# disclaimer, a GSTIN row) is present or absent, which byte-length
+# alone can never catch. Automation here is necessary, not sufficient:
+# per Rule 13, the actual acceptance gate is the visual review against
+# fixtures/reference-pdfs/PTT-150/151/152.pdf, not these checks alone.
+#
 # Deliberately `set -u` but NOT `set -e`.
 set -u
 
@@ -41,7 +51,7 @@ RESET=$'\033[0m'
 
 PASS=0
 FAIL=0
-TOTAL_CHECKS=18
+TOTAL_CHECKS=29
 FAILED_STEPS=()
 
 pass() {
@@ -70,6 +80,12 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 1
 fi
 echo "  jq is installed"
+
+if ! command -v pdftotext >/dev/null 2>&1; then
+  printf '%spdftotext is required for Task 4.7'\''s content assertions.\nInstall it with: brew install poppler%s\n' "$RED" "$RESET"
+  exit 1
+fi
+echo "  pdftotext is installed"
 echo
 
 # ─── SETUP ───
@@ -116,6 +132,12 @@ CUST_LOCAL=$(curl -s -X POST "$BASE_URL/customers" -H "Authorization: Bearer $OW
 CUST_OUTSTATION=$(curl -s -X POST "$BASE_URL/customers" -H "Authorization: Bearer $OWNER_A_TOKEN" -H "Content-Type: application/json" \
   -d '{"customer_type":"B2B","company_name":"Mumbai Freight Co","gstin":"27XXXXX5678B1Z7","credit_days":30,"address":{"line1":"5 Marine Drive","city":"Mumbai","state":"Maharashtra","pincode":"400001"}}' \
   | jq -r '.customer.id // empty')
+# Task 4.7: B2C customer — no gstin, no company_name, no state. Used to
+# prove the Bill-To GSTIN/State row is hidden (bill-to.hbs switches on
+# customer.gstin presence, not customer_type — ADR-014).
+CUST_B2C=$(curl -s -X POST "$BASE_URL/customers" -H "Authorization: Bearer $OWNER_A_TOKEN" -H "Content-Type: application/json" \
+  -d '{"customer_type":"B2C","name":"Ravi Kumar","phone":"9876500099"}' \
+  | jq -r '.customer.id // empty')
 
 RULE_LOCAL_SEDAN=$(curl -s -X POST "$BASE_URL/pricing/rules" -H "Authorization: Bearer $OWNER_A_TOKEN" -H "Content-Type: application/json" \
   -d '{"rule_type":"LOCAL_PACKAGE","vehicle_type":"SEDAN","label":"SEDAN 8H/80KM","base_hours":8,"base_km":80,"base_price_rupees":2200,"extra_km_rate_rupees":14,"extra_hr_rate_rupees":180,"effective_from":"2026-01-01"}' | jq -r '.rule.id // empty')
@@ -124,10 +146,10 @@ RULE_OUTSTATION_KIA=$(curl -s -X POST "$BASE_URL/pricing/rules" -H "Authorizatio
 RULE_PERF_SEDAN=$(curl -s -X POST "$BASE_URL/pricing/rules" -H "Authorization: Bearer $OWNER_A_TOKEN" -H "Content-Type: application/json" \
   -d '{"rule_type":"PERFORMANCE","vehicle_type":"SEDAN","label":"SEDAN Perf","per_km_rate_rupees":14,"performance_batta_rupees":300,"effective_from":"2026-01-01"}' | jq -r '.rule.id // empty')
 
-if [ -z "$VEH_SEDAN" ] || [ -z "$VEH_KIA" ] || [ -z "$CUST_LOCAL" ] || [ -z "$CUST_OUTSTATION" ] || \
+if [ -z "$VEH_SEDAN" ] || [ -z "$VEH_KIA" ] || [ -z "$CUST_LOCAL" ] || [ -z "$CUST_OUTSTATION" ] || [ -z "$CUST_B2C" ] || \
    [ -z "$RULE_LOCAL_SEDAN" ] || [ -z "$RULE_OUTSTATION_KIA" ] || [ -z "$RULE_PERF_SEDAN" ]; then
   printf '%sSetup did not yield all required fixtures. Aborting.%s\n' "$RED" "$RESET"
-  echo "VEH_SEDAN=$VEH_SEDAN VEH_KIA=$VEH_KIA CUST_LOCAL=$CUST_LOCAL CUST_OUTSTATION=$CUST_OUTSTATION"
+  echo "VEH_SEDAN=$VEH_SEDAN VEH_KIA=$VEH_KIA CUST_LOCAL=$CUST_LOCAL CUST_OUTSTATION=$CUST_OUTSTATION CUST_B2C=$CUST_B2C"
   exit 1
 fi
 
@@ -150,9 +172,26 @@ T_PERF=$(new_trip LOCAL PERFORMANCE "$CUST_LOCAL" "$VEH_SEDAN" "$DAYS_AGO_3" 300
 T_DRAFT_ONLY=$(new_trip LOCAL GST "$CUST_LOCAL" "$VEH_SEDAN" "$DAYS_AGO_5" 90 8)
 T_UNGENERATED=$(new_trip LOCAL GST "$CUST_LOCAL" "$VEH_SEDAN" "$DAYS_AGO_5" 95 8)
 
-if [ -z "$T_LOCAL" ] || [ -z "$T_OUTSTATION" ] || [ -z "$T_PERF" ] || [ -z "$T_DRAFT_ONLY" ] || [ -z "$T_UNGENERATED" ]; then
+# Task 4.7 fixtures — B2C tax invoices (GSTIN-hiding check) and the new
+# Proforma templates. GST billing_mode (not PERFORMANCE) on purpose: a
+# Proforma invoice is a preview of what would become a real TAX
+# invoice, so it needs the same LOCAL_PACKAGE/OUTSTATION_SLAB pricing
+# data (base package + extra KM/Hrs, or slab + batta) that PTT-152's
+# layout expects — a genuinely flat-rate PERFORMANCE-billing_mode trip
+# has no "package" to break down (see known-issues.md).
+T_LOCAL_B2C=$(new_trip LOCAL GST "$CUST_B2C" "$VEH_SEDAN" "$DAYS_AGO_5" 217 12)
+T_OUTSTATION_B2C=$(new_trip OUTSTATION GST "$CUST_B2C" "$VEH_KIA" "$DAYS_AGO_8" 1200 0 ',"total_days":4')
+T_PROFORMA_LOCAL_B2B=$(new_trip LOCAL GST "$CUST_LOCAL" "$VEH_SEDAN" "$DAYS_AGO_5" 217 12)
+T_PROFORMA_LOCAL_B2C=$(new_trip LOCAL GST "$CUST_B2C" "$VEH_SEDAN" "$DAYS_AGO_5" 217 12)
+T_PROFORMA_OUT_B2B=$(new_trip OUTSTATION GST "$CUST_OUTSTATION" "$VEH_KIA" "$DAYS_AGO_8" 1200 0 ',"total_days":4')
+T_PROFORMA_OUT_B2C=$(new_trip OUTSTATION GST "$CUST_B2C" "$VEH_KIA" "$DAYS_AGO_8" 1200 0 ',"total_days":4')
+
+if [ -z "$T_LOCAL" ] || [ -z "$T_OUTSTATION" ] || [ -z "$T_PERF" ] || [ -z "$T_DRAFT_ONLY" ] || [ -z "$T_UNGENERATED" ] || \
+   [ -z "$T_LOCAL_B2C" ] || [ -z "$T_OUTSTATION_B2C" ] || [ -z "$T_PROFORMA_LOCAL_B2B" ] || [ -z "$T_PROFORMA_LOCAL_B2C" ] || \
+   [ -z "$T_PROFORMA_OUT_B2B" ] || [ -z "$T_PROFORMA_OUT_B2C" ]; then
   printf '%sSetup did not create all core trips. Aborting.%s\n' "$RED" "$RESET"
   echo "T_LOCAL=$T_LOCAL T_OUTSTATION=$T_OUTSTATION T_PERF=$T_PERF T_DRAFT_ONLY=$T_DRAFT_ONLY T_UNGENERATED=$T_UNGENERATED"
+  echo "T_LOCAL_B2C=$T_LOCAL_B2C T_OUTSTATION_B2C=$T_OUTSTATION_B2C T_PROFORMA_LOCAL_B2B=$T_PROFORMA_LOCAL_B2B T_PROFORMA_LOCAL_B2C=$T_PROFORMA_LOCAL_B2C T_PROFORMA_OUT_B2B=$T_PROFORMA_OUT_B2B T_PROFORMA_OUT_B2C=$T_PROFORMA_OUT_B2C"
   exit 1
 fi
 finalize_trip "$T_LOCAL"
@@ -160,6 +199,12 @@ finalize_trip "$T_OUTSTATION"
 finalize_trip "$T_PERF"
 finalize_trip "$T_DRAFT_ONLY"
 finalize_trip "$T_UNGENERATED"
+finalize_trip "$T_LOCAL_B2C"
+finalize_trip "$T_OUTSTATION_B2C"
+finalize_trip "$T_PROFORMA_LOCAL_B2B"
+finalize_trip "$T_PROFORMA_LOCAL_B2C"
+finalize_trip "$T_PROFORMA_OUT_B2B"
+finalize_trip "$T_PROFORMA_OUT_B2C"
 
 echo "Setup: tenant A (Pravasi Tours, business profile set), tenant B, SEDAN+KIA vehicles, 2 customers, 3 pricing rules, 3 FINALIZED trips"
 echo
@@ -376,6 +421,133 @@ if echo "$CONTENT_DISPOSITION" | grep -q "$EXPECTED_FRAGMENT"; then
   pass "Downloaded filename derives from invoice_number ($LOCAL_INVOICE_NUMBER -> $EXPECTED_FRAGMENT)"
 else
   fail "Filename derivation (Step 16)" "disposition='$CONTENT_DISPOSITION' expected fragment='$EXPECTED_FRAGMENT'"
+fi
+
+# ─── Task 4.7: Proforma split + B2C conditional + visual parity ───
+
+# Isolates the "Bill To" block's own text so a GSTIN assertion can't
+# be confused by the TENANT's own GSTIN line in the header — a TAX
+# invoice always shows the issuer's GSTIN regardless of B2B/B2C (GST
+# law requires it); only the RECIPIENT's GSTIN row is conditional.
+bill_to_text() {
+  pdftotext -layout "$1" - | sed -n '/BILL TO/,/SERVICE DETAILS/p'
+}
+
+# ─── Step 17: TAX LOCAL invoice for a B2C customer hides recipient GSTIN ───
+INV_LOCAL_B2C_RESP=$(curl -s -X POST "$BASE_URL/invoices" -H "Authorization: Bearer $OWNER_A_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"invoice_type\":\"TAX\",\"customer_id\":\"$CUST_B2C\",\"trip_sheet_ids\":[\"$T_LOCAL_B2C\"]}")
+INV_LOCAL_B2C=$(echo "$INV_LOCAL_B2C_RESP" | jq -r '.invoice.id // empty')
+curl -s -X POST "$BASE_URL/invoices/$INV_LOCAL_B2C/issue" -H "Authorization: Bearer $OWNER_A_TOKEN" > /dev/null
+curl -s -X POST "$BASE_URL/invoices/$INV_LOCAL_B2C/pdf" -H "Authorization: Bearer $OWNER_A_TOKEN" > /dev/null
+curl -s "$BASE_URL/invoices/$INV_LOCAL_B2C/pdf" -H "Authorization: Bearer $OWNER_A_TOKEN" -o "$WORK_DIR/tax_local_b2c.pdf"
+
+if [ -n "$INV_LOCAL_B2C" ] && ! bill_to_text "$WORK_DIR/tax_local_b2c.pdf" | grep -q "GSTIN:"; then
+  pass "TAX LOCAL invoice (B2C customer) hides the recipient GSTIN/State row"
+else
+  fail "TAX LOCAL B2C GSTIN hiding (Step 17)" "invoice=$INV_LOCAL_B2C bill-to text: $(bill_to_text "$WORK_DIR/tax_local_b2c.pdf" | tr '\n' ' ')"
+fi
+
+# ─── Step 18: TAX OUTSTATION invoice for a B2C customer hides recipient GSTIN ───
+INV_OUT_B2C_RESP=$(curl -s -X POST "$BASE_URL/invoices" -H "Authorization: Bearer $OWNER_A_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"invoice_type\":\"TAX\",\"customer_id\":\"$CUST_B2C\",\"trip_sheet_ids\":[\"$T_OUTSTATION_B2C\"]}")
+INV_OUT_B2C=$(echo "$INV_OUT_B2C_RESP" | jq -r '.invoice.id // empty')
+curl -s -X POST "$BASE_URL/invoices/$INV_OUT_B2C/issue" -H "Authorization: Bearer $OWNER_A_TOKEN" > /dev/null
+curl -s -X POST "$BASE_URL/invoices/$INV_OUT_B2C/pdf" -H "Authorization: Bearer $OWNER_A_TOKEN" > /dev/null
+curl -s "$BASE_URL/invoices/$INV_OUT_B2C/pdf" -H "Authorization: Bearer $OWNER_A_TOKEN" -o "$WORK_DIR/tax_out_b2c.pdf"
+
+if [ -n "$INV_OUT_B2C" ] && ! bill_to_text "$WORK_DIR/tax_out_b2c.pdf" | grep -q "GSTIN:"; then
+  pass "TAX OUTSTATION invoice (B2C customer) hides the recipient GSTIN/State row"
+else
+  fail "TAX OUTSTATION B2C GSTIN hiding (Step 18)" "invoice=$INV_OUT_B2C bill-to text: $(bill_to_text "$WORK_DIR/tax_out_b2c.pdf" | tr '\n' ' ')"
+fi
+
+# ─── Step 19: Proforma LOCAL invoice (B2B) — PTT-152 layout ───
+INV_PROFORMA_LOCAL_B2B_RESP=$(curl -s -X POST "$BASE_URL/invoices" -H "Authorization: Bearer $OWNER_A_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"invoice_type\":\"PERFORMANCE\",\"customer_id\":\"$CUST_LOCAL\",\"trip_sheet_ids\":[\"$T_PROFORMA_LOCAL_B2B\"]}")
+INV_PROFORMA_LOCAL_B2B=$(echo "$INV_PROFORMA_LOCAL_B2B_RESP" | jq -r '.invoice.id // empty')
+curl -s -X POST "$BASE_URL/invoices/$INV_PROFORMA_LOCAL_B2B/issue" -H "Authorization: Bearer $OWNER_A_TOKEN" > /dev/null
+curl -s -X POST "$BASE_URL/invoices/$INV_PROFORMA_LOCAL_B2B/pdf" -H "Authorization: Bearer $OWNER_A_TOKEN" > /dev/null
+curl -s "$BASE_URL/invoices/$INV_PROFORMA_LOCAL_B2B/pdf" -H "Authorization: Bearer $OWNER_A_TOKEN" -o "$WORK_DIR/proforma_local_b2b.pdf"
+PROFORMA_LOCAL_B2B_TEXT=$(pdftotext -layout "$WORK_DIR/proforma_local_b2b.pdf" - 2>/dev/null)
+
+if [ -n "$INV_PROFORMA_LOCAL_B2B" ] && echo "$PROFORMA_LOCAL_B2B_TEXT" | grep -q "PROFORMA INVOICE"; then
+  pass "Proforma LOCAL invoice renders with a PROFORMA INVOICE header"
+else
+  fail "Proforma LOCAL header (Step 19a)" "invoice=$INV_PROFORMA_LOCAL_B2B"
+fi
+
+if echo "$PROFORMA_LOCAL_B2B_TEXT" | grep -q "8Hrs/80Km"; then
+  pass "Proforma LOCAL invoice shows the 8Hrs/80Km package column (PTT-152 layout)"
+else
+  fail "Proforma LOCAL 8Hrs/80Km column (Step 19b)" "text did not contain '8Hrs/80Km'"
+fi
+
+if ! echo "$PROFORMA_LOCAL_B2B_TEXT" | grep -qE "CGST|SGST|Taxable Value"; then
+  pass "Proforma LOCAL invoice omits CGST/SGST/Taxable Value (not a tax document)"
+else
+  fail "Proforma LOCAL GST-free (Step 19c)" "text unexpectedly contained CGST/SGST/Taxable Value"
+fi
+
+if echo "$PROFORMA_LOCAL_B2B_TEXT" | grep -q "This is a Proforma Invoice and not a demand for payment"; then
+  pass "Proforma LOCAL invoice shows the Proforma disclaimer footer"
+else
+  fail "Proforma LOCAL disclaimer (Step 19d)" "disclaimer text not found"
+fi
+
+# ─── Step 20: Proforma OUTSTATION invoice (B2B) ───
+INV_PROFORMA_OUT_B2B_RESP=$(curl -s -X POST "$BASE_URL/invoices" -H "Authorization: Bearer $OWNER_A_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"invoice_type\":\"PERFORMANCE\",\"customer_id\":\"$CUST_OUTSTATION\",\"trip_sheet_ids\":[\"$T_PROFORMA_OUT_B2B\"]}")
+INV_PROFORMA_OUT_B2B=$(echo "$INV_PROFORMA_OUT_B2B_RESP" | jq -r '.invoice.id // empty')
+curl -s -X POST "$BASE_URL/invoices/$INV_PROFORMA_OUT_B2B/issue" -H "Authorization: Bearer $OWNER_A_TOKEN" > /dev/null
+curl -s -X POST "$BASE_URL/invoices/$INV_PROFORMA_OUT_B2B/pdf" -H "Authorization: Bearer $OWNER_A_TOKEN" > /dev/null
+curl -s "$BASE_URL/invoices/$INV_PROFORMA_OUT_B2B/pdf" -H "Authorization: Bearer $OWNER_A_TOKEN" -o "$WORK_DIR/proforma_out_b2b.pdf"
+PROFORMA_OUT_B2B_TEXT=$(pdftotext -layout "$WORK_DIR/proforma_out_b2b.pdf" - 2>/dev/null)
+
+if [ -n "$INV_PROFORMA_OUT_B2B" ] && echo "$PROFORMA_OUT_B2B_TEXT" | grep -q "PROFORMA INVOICE"; then
+  pass "Proforma OUTSTATION invoice renders with a PROFORMA INVOICE header"
+else
+  fail "Proforma OUTSTATION header (Step 20a)" "invoice=$INV_PROFORMA_OUT_B2B"
+fi
+
+if echo "$PROFORMA_OUT_B2B_TEXT" | grep -q "Running" && echo "$PROFORMA_OUT_B2B_TEXT" | grep -q "Driver" && echo "$PROFORMA_OUT_B2B_TEXT" | grep -q "Bata"; then
+  pass "Proforma OUTSTATION invoice shows Running Cost and Driver Bata columns (tax-outstation column parity)"
+else
+  fail "Proforma OUTSTATION column parity (Step 20b)" "Running/Driver/Bata not all found in text"
+fi
+
+if ! echo "$PROFORMA_OUT_B2B_TEXT" | grep -qE "CGST|SGST"; then
+  pass "Proforma OUTSTATION invoice omits CGST/SGST (not a tax document)"
+else
+  fail "Proforma OUTSTATION GST-free (Step 20c)" "text unexpectedly contained CGST/SGST"
+fi
+
+# ─── Step 21/22: Proforma invoices (B2C) hide GSTIN entirely — tenant's
+# own GSTIN is ALSO hidden on Proforma docs (hideTenantTaxInfo, Part B),
+# so unlike the TAX checks above this can assert over the WHOLE document. ───
+INV_PROFORMA_LOCAL_B2C_RESP=$(curl -s -X POST "$BASE_URL/invoices" -H "Authorization: Bearer $OWNER_A_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"invoice_type\":\"PERFORMANCE\",\"customer_id\":\"$CUST_B2C\",\"trip_sheet_ids\":[\"$T_PROFORMA_LOCAL_B2C\"]}")
+INV_PROFORMA_LOCAL_B2C=$(echo "$INV_PROFORMA_LOCAL_B2C_RESP" | jq -r '.invoice.id // empty')
+curl -s -X POST "$BASE_URL/invoices/$INV_PROFORMA_LOCAL_B2C/issue" -H "Authorization: Bearer $OWNER_A_TOKEN" > /dev/null
+curl -s -X POST "$BASE_URL/invoices/$INV_PROFORMA_LOCAL_B2C/pdf" -H "Authorization: Bearer $OWNER_A_TOKEN" > /dev/null
+curl -s "$BASE_URL/invoices/$INV_PROFORMA_LOCAL_B2C/pdf" -H "Authorization: Bearer $OWNER_A_TOKEN" -o "$WORK_DIR/proforma_local_b2c.pdf"
+
+if [ -n "$INV_PROFORMA_LOCAL_B2C" ] && ! pdftotext -layout "$WORK_DIR/proforma_local_b2c.pdf" - 2>/dev/null | grep -q "GSTIN:"; then
+  pass "Proforma LOCAL invoice (B2C customer) contains no GSTIN anywhere (tenant's own is also hidden on Proforma docs)"
+else
+  fail "Proforma LOCAL B2C GSTIN-free (Step 21)" "invoice=$INV_PROFORMA_LOCAL_B2C"
+fi
+
+INV_PROFORMA_OUT_B2C_RESP=$(curl -s -X POST "$BASE_URL/invoices" -H "Authorization: Bearer $OWNER_A_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"invoice_type\":\"PERFORMANCE\",\"customer_id\":\"$CUST_B2C\",\"trip_sheet_ids\":[\"$T_PROFORMA_OUT_B2C\"]}")
+INV_PROFORMA_OUT_B2C=$(echo "$INV_PROFORMA_OUT_B2C_RESP" | jq -r '.invoice.id // empty')
+curl -s -X POST "$BASE_URL/invoices/$INV_PROFORMA_OUT_B2C/issue" -H "Authorization: Bearer $OWNER_A_TOKEN" > /dev/null
+curl -s -X POST "$BASE_URL/invoices/$INV_PROFORMA_OUT_B2C/pdf" -H "Authorization: Bearer $OWNER_A_TOKEN" > /dev/null
+curl -s "$BASE_URL/invoices/$INV_PROFORMA_OUT_B2C/pdf" -H "Authorization: Bearer $OWNER_A_TOKEN" -o "$WORK_DIR/proforma_out_b2c.pdf"
+
+if [ -n "$INV_PROFORMA_OUT_B2C" ] && ! pdftotext -layout "$WORK_DIR/proforma_out_b2c.pdf" - 2>/dev/null | grep -q "GSTIN:"; then
+  pass "Proforma OUTSTATION invoice (B2C customer) contains no GSTIN anywhere"
+else
+  fail "Proforma OUTSTATION B2C GSTIN-free (Step 22)" "invoice=$INV_PROFORMA_OUT_B2C"
 fi
 
 echo
