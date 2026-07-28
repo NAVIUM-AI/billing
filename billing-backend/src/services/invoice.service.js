@@ -442,6 +442,7 @@ async function createDraftInvoice(tenantId, input, actorUserId, db) {
         parkingManualOverride: reimbursements.parking_manual_override,
         permitManualOverride: reimbursements.permit_manual_override,
         fasttagManualOverride: reimbursements.fasttag_manual_override,
+        reverseCharge: input.reverse_charge ?? null,
         createdBy: actorUserId,
       },
       client,
@@ -598,6 +599,7 @@ async function updateDraftInvoice(tenantId, id, patch, actorUserId, db) {
     if (patch.notes !== undefined) patchToDb.notes = patch.notes?.trim() || null;
     if (patch.terms !== undefined) patchToDb.terms = patch.terms?.trim() || null;
     if (patch.discount_reason !== undefined) patchToDb.discount_reason = patch.discount_reason?.trim() || null;
+    if (patch.reverse_charge !== undefined) patchToDb.reverse_charge = patch.reverse_charge;
 
     const updated = await invoiceRepo.updateDraft(tenantId, id, patchToDb, client);
     if (!updated) {

@@ -51,7 +51,7 @@ RESET=$'\033[0m'
 
 PASS=0
 FAIL=0
-TOTAL_CHECKS=29
+TOTAL_CHECKS=34
 FAILED_STEPS=()
 
 pass() {
@@ -105,12 +105,13 @@ if [ -z "$OWNER_A_TOKEN" ]; then
   exit 1
 fi
 
-# PATCH /settings/business only accepts fields that actually exist on
-# the tenants row — no tagline/phone/phone2/website/address columns
-# exist there at all (same gap verify-invoice-lifecycle.sh already
-# flagged). bank_details is a structured object, not free text.
+# Task 4.8 added tagline/phone/jurisdiction to tenants and pan to
+# bank_details — previously PATCH /settings/business had no columns to
+# accept them at all (same gap verify-invoice-lifecycle.sh flagged).
+# Set here so the Step-31/32/33 PDFs below have real content to render
+# and visually review (Rule 14).
 curl -s -X PATCH "$BASE_URL/settings/business" -H "Authorization: Bearer $OWNER_A_TOKEN" -H "Content-Type: application/json" \
-  -d '{"state_code":"KA","gstin":"29ABCDE1234F1Z5","pan":"ABCDE1234F","bank_details":{"account_name":"Pravasi Tours","account_number":"12345678","ifsc":"HDFC0000123","bank_name":"HDFC Bank","branch":"MG Road"}}' > /dev/null
+  -d '{"state_code":"KA","gstin":"29ABCDE1234F1Z5","pan":"ABCDE1234F","tagline":"Car Rental & Outstation Cab Services","phone":"+91-80-1234-5678","jurisdiction":"Bangalore","bank_details":{"account_name":"Pravasi Tours","account_number":"12345678","ifsc":"HDFC0000123","bank_name":"HDFC Bank","branch":"MG Road","pan":"BQSPR7829H"}}' > /dev/null
 
 SIGNUP_B=$(curl -s -X POST "$BASE_URL/auth/signup" -H "Content-Type: application/json" \
   -d "{\"businessName\":\"Verify PDF Co B\",\"email\":\"$OWNER_B_EMAIL\",\"password\":\"$TEST_PASSWORD\",\"fullName\":\"Owner B\"}")
@@ -186,12 +187,22 @@ T_PROFORMA_LOCAL_B2C=$(new_trip LOCAL GST "$CUST_B2C" "$VEH_SEDAN" "$DAYS_AGO_5"
 T_PROFORMA_OUT_B2B=$(new_trip OUTSTATION GST "$CUST_OUTSTATION" "$VEH_KIA" "$DAYS_AGO_8" 1200 0 ',"total_days":4')
 T_PROFORMA_OUT_B2C=$(new_trip OUTSTATION GST "$CUST_B2C" "$VEH_KIA" "$DAYS_AGO_8" 1200 0 ',"total_days":4')
 
+# Task 4.8 fixtures — reverse_charge=true/false/omitted on TAX invoices,
+# and reverse_charge=true on a Proforma (to confirm hideTenantTaxInfo
+# still hides it there, same gate as Place of Supply).
+T_RC_TRUE=$(new_trip LOCAL GST "$CUST_LOCAL" "$VEH_SEDAN" "$DAYS_AGO_5" 90 8)
+T_RC_FALSE=$(new_trip LOCAL GST "$CUST_LOCAL" "$VEH_SEDAN" "$DAYS_AGO_5" 90 8)
+T_RC_NULL=$(new_trip LOCAL GST "$CUST_LOCAL" "$VEH_SEDAN" "$DAYS_AGO_5" 90 8)
+T_RC_PROFORMA=$(new_trip LOCAL GST "$CUST_LOCAL" "$VEH_SEDAN" "$DAYS_AGO_5" 217 12)
+
 if [ -z "$T_LOCAL" ] || [ -z "$T_OUTSTATION" ] || [ -z "$T_PERF" ] || [ -z "$T_DRAFT_ONLY" ] || [ -z "$T_UNGENERATED" ] || \
    [ -z "$T_LOCAL_B2C" ] || [ -z "$T_OUTSTATION_B2C" ] || [ -z "$T_PROFORMA_LOCAL_B2B" ] || [ -z "$T_PROFORMA_LOCAL_B2C" ] || \
-   [ -z "$T_PROFORMA_OUT_B2B" ] || [ -z "$T_PROFORMA_OUT_B2C" ]; then
+   [ -z "$T_PROFORMA_OUT_B2B" ] || [ -z "$T_PROFORMA_OUT_B2C" ] || \
+   [ -z "$T_RC_TRUE" ] || [ -z "$T_RC_FALSE" ] || [ -z "$T_RC_NULL" ] || [ -z "$T_RC_PROFORMA" ]; then
   printf '%sSetup did not create all core trips. Aborting.%s\n' "$RED" "$RESET"
   echo "T_LOCAL=$T_LOCAL T_OUTSTATION=$T_OUTSTATION T_PERF=$T_PERF T_DRAFT_ONLY=$T_DRAFT_ONLY T_UNGENERATED=$T_UNGENERATED"
   echo "T_LOCAL_B2C=$T_LOCAL_B2C T_OUTSTATION_B2C=$T_OUTSTATION_B2C T_PROFORMA_LOCAL_B2B=$T_PROFORMA_LOCAL_B2B T_PROFORMA_LOCAL_B2C=$T_PROFORMA_LOCAL_B2C T_PROFORMA_OUT_B2B=$T_PROFORMA_OUT_B2B T_PROFORMA_OUT_B2C=$T_PROFORMA_OUT_B2C"
+  echo "T_RC_TRUE=$T_RC_TRUE T_RC_FALSE=$T_RC_FALSE T_RC_NULL=$T_RC_NULL T_RC_PROFORMA=$T_RC_PROFORMA"
   exit 1
 fi
 finalize_trip "$T_LOCAL"
@@ -205,6 +216,10 @@ finalize_trip "$T_PROFORMA_LOCAL_B2B"
 finalize_trip "$T_PROFORMA_LOCAL_B2C"
 finalize_trip "$T_PROFORMA_OUT_B2B"
 finalize_trip "$T_PROFORMA_OUT_B2C"
+finalize_trip "$T_RC_TRUE"
+finalize_trip "$T_RC_FALSE"
+finalize_trip "$T_RC_NULL"
+finalize_trip "$T_RC_PROFORMA"
 
 echo "Setup: tenant A (Pravasi Tours, business profile set), tenant B, SEDAN+KIA vehicles, 2 customers, 3 pricing rules, 3 FINALIZED trips"
 echo
@@ -548,6 +563,84 @@ if [ -n "$INV_PROFORMA_OUT_B2C" ] && ! pdftotext -layout "$WORK_DIR/proforma_out
   pass "Proforma OUTSTATION invoice (B2C customer) contains no GSTIN anywhere"
 else
   fail "Proforma OUTSTATION B2C GSTIN-free (Step 22)" "invoice=$INV_PROFORMA_OUT_B2C"
+fi
+
+# ─── Task 4.8: tagline/phone/jurisdiction/bank-PAN + reverse_charge ───
+
+# Step 23: the Yellow (LOCAL tax) PDF generated back in Step 2 already
+# carries the tenant's tagline/phone/jurisdiction/bank_details.pan set
+# in this script's own SETUP block — assert all four actually render.
+LOCAL_FULL_TEXT=$(pdftotext -layout "$WORK_DIR/local.pdf" - 2>/dev/null)
+STEP23_REASONS=()
+echo "$LOCAL_FULL_TEXT" | grep -q "Car Rental & Outstation Cab Services" || STEP23_REASONS+=("tagline missing")
+echo "$LOCAL_FULL_TEXT" | grep -q "80-1234-5678" || STEP23_REASONS+=("phone missing")
+echo "$LOCAL_FULL_TEXT" | grep -q "Subject to Bangalore jurisdiction" || STEP23_REASONS+=("jurisdiction sentence missing")
+echo "$LOCAL_FULL_TEXT" | grep -q "BQSPR7829H" || STEP23_REASONS+=("bank_details.pan missing")
+
+if [ ${#STEP23_REASONS[@]} -eq 0 ]; then
+  pass "TAX LOCAL invoice PDF (Task 4.8): tagline, phone, jurisdiction sentence, and bank PAN all render"
+else
+  fail "Tenant tagline/phone/jurisdiction/bank-PAN rendering (Step 23)" "$(IFS='; '; echo "${STEP23_REASONS[*]}")"
+fi
+
+# Step 24: reverse_charge=true -> "Reverse Charge: Yes" on a TAX invoice.
+INV_RC_TRUE_RESP=$(curl -s -X POST "$BASE_URL/invoices" -H "Authorization: Bearer $OWNER_A_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"invoice_type\":\"TAX\",\"customer_id\":\"$CUST_LOCAL\",\"trip_sheet_ids\":[\"$T_RC_TRUE\"],\"reverse_charge\":true}")
+INV_RC_TRUE=$(echo "$INV_RC_TRUE_RESP" | jq -r '.invoice.id // empty')
+curl -s -X POST "$BASE_URL/invoices/$INV_RC_TRUE/issue" -H "Authorization: Bearer $OWNER_A_TOKEN" > /dev/null
+curl -s -X POST "$BASE_URL/invoices/$INV_RC_TRUE/pdf" -H "Authorization: Bearer $OWNER_A_TOKEN" > /dev/null
+curl -s "$BASE_URL/invoices/$INV_RC_TRUE/pdf" -H "Authorization: Bearer $OWNER_A_TOKEN" -o "$WORK_DIR/rc_true.pdf"
+
+if [ -n "$INV_RC_TRUE" ] && pdftotext -layout "$WORK_DIR/rc_true.pdf" - 2>/dev/null | grep -q "Reverse Charge:.*Yes"; then
+  pass "TAX invoice with reverse_charge=true (Task 4.8): PDF renders 'Reverse Charge: Yes'"
+else
+  fail "reverse_charge=true PDF rendering (Step 24)" "invoice=$INV_RC_TRUE"
+fi
+
+# Step 25: reverse_charge=false -> "Reverse Charge: No".
+INV_RC_FALSE_RESP=$(curl -s -X POST "$BASE_URL/invoices" -H "Authorization: Bearer $OWNER_A_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"invoice_type\":\"TAX\",\"customer_id\":\"$CUST_LOCAL\",\"trip_sheet_ids\":[\"$T_RC_FALSE\"],\"reverse_charge\":false}")
+INV_RC_FALSE=$(echo "$INV_RC_FALSE_RESP" | jq -r '.invoice.id // empty')
+curl -s -X POST "$BASE_URL/invoices/$INV_RC_FALSE/issue" -H "Authorization: Bearer $OWNER_A_TOKEN" > /dev/null
+curl -s -X POST "$BASE_URL/invoices/$INV_RC_FALSE/pdf" -H "Authorization: Bearer $OWNER_A_TOKEN" > /dev/null
+curl -s "$BASE_URL/invoices/$INV_RC_FALSE/pdf" -H "Authorization: Bearer $OWNER_A_TOKEN" -o "$WORK_DIR/rc_false.pdf"
+
+if [ -n "$INV_RC_FALSE" ] && pdftotext -layout "$WORK_DIR/rc_false.pdf" - 2>/dev/null | grep -q "Reverse Charge:.*No"; then
+  pass "TAX invoice with reverse_charge=false (Task 4.8): PDF renders 'Reverse Charge: No'"
+else
+  fail "reverse_charge=false PDF rendering (Step 25)" "invoice=$INV_RC_FALSE"
+fi
+
+# Step 26: reverse_charge omitted (NULL) -> the row is absent entirely,
+# not rendered as a blank/guessed value (see invoice.validator.js's
+# comment on this field — a wrong declaration is a compliance risk).
+INV_RC_NULL_RESP=$(curl -s -X POST "$BASE_URL/invoices" -H "Authorization: Bearer $OWNER_A_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"invoice_type\":\"TAX\",\"customer_id\":\"$CUST_LOCAL\",\"trip_sheet_ids\":[\"$T_RC_NULL\"]}")
+INV_RC_NULL=$(echo "$INV_RC_NULL_RESP" | jq -r '.invoice.id // empty')
+curl -s -X POST "$BASE_URL/invoices/$INV_RC_NULL/issue" -H "Authorization: Bearer $OWNER_A_TOKEN" > /dev/null
+curl -s -X POST "$BASE_URL/invoices/$INV_RC_NULL/pdf" -H "Authorization: Bearer $OWNER_A_TOKEN" > /dev/null
+curl -s "$BASE_URL/invoices/$INV_RC_NULL/pdf" -H "Authorization: Bearer $OWNER_A_TOKEN" -o "$WORK_DIR/rc_null.pdf"
+
+if [ -n "$INV_RC_NULL" ] && ! pdftotext -layout "$WORK_DIR/rc_null.pdf" - 2>/dev/null | grep -q "Reverse Charge:"; then
+  pass "TAX invoice without reverse_charge (Task 4.8): PDF omits the Reverse Charge row entirely (never guessed)"
+else
+  fail "reverse_charge=null PDF omission (Step 26)" "invoice=$INV_RC_NULL"
+fi
+
+# Step 27: reverse_charge=true on a Proforma invoice — still hidden,
+# same hideTenantTaxInfo gate as Place of Supply (Proforma isn't a tax
+# document).
+INV_RC_PROFORMA_RESP=$(curl -s -X POST "$BASE_URL/invoices" -H "Authorization: Bearer $OWNER_A_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"invoice_type\":\"PERFORMANCE\",\"customer_id\":\"$CUST_LOCAL\",\"trip_sheet_ids\":[\"$T_RC_PROFORMA\"],\"reverse_charge\":true}")
+INV_RC_PROFORMA=$(echo "$INV_RC_PROFORMA_RESP" | jq -r '.invoice.id // empty')
+curl -s -X POST "$BASE_URL/invoices/$INV_RC_PROFORMA/issue" -H "Authorization: Bearer $OWNER_A_TOKEN" > /dev/null
+curl -s -X POST "$BASE_URL/invoices/$INV_RC_PROFORMA/pdf" -H "Authorization: Bearer $OWNER_A_TOKEN" > /dev/null
+curl -s "$BASE_URL/invoices/$INV_RC_PROFORMA/pdf" -H "Authorization: Bearer $OWNER_A_TOKEN" -o "$WORK_DIR/rc_proforma.pdf"
+
+if [ -n "$INV_RC_PROFORMA" ] && ! pdftotext -layout "$WORK_DIR/rc_proforma.pdf" - 2>/dev/null | grep -q "Reverse Charge:"; then
+  pass "Proforma invoice with reverse_charge=true (Task 4.8): still hidden — not a tax document (hideTenantTaxInfo gate)"
+else
+  fail "reverse_charge hidden on Proforma (Step 27)" "invoice=$INV_RC_PROFORMA"
 fi
 
 echo

@@ -61,7 +61,7 @@ RESET=$'\033[0m'
 
 PASS=0
 FAIL=0
-TOTAL_CHECKS=32
+TOTAL_CHECKS=36
 FAILED_STEPS=()
 
 pass() {
@@ -671,6 +671,64 @@ if [ "$REG30_LIST_STATUS" = "200" ] && [ "$REG30_GET_STATUS" = "200" ]; then
   pass "Regression: GET /trips and GET /trips/:id (Module 3) still work"
 else
   fail "Regression Module 3 trips (Step 30)" "list status '$REG30_LIST_STATUS', get status '$REG30_GET_STATUS'"
+fi
+
+# ─── Step 31 (Task 4.8): reverse_charge round-trips on create ───
+# Three fresh, spare CUST_KA/LOCAL trips — T1-T6 are all already held or
+# consumed by earlier steps by this point in the script.
+RC_T_TRUE=$(curl -s -X POST "$BASE_URL/trips" -H "Authorization: Bearer $STAFF_A_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"service_type\":\"LOCAL\",\"billing_mode\":\"GST\",\"customer_id\":\"$CUST_KA\",\"vehicle_id\":\"$VEH_S\",\"trip_date\":\"$YESTERDAY\",\"total_km\":70,\"total_hours\":6}" | jq -r '.trip.id // empty')
+RC_T_FALSE=$(curl -s -X POST "$BASE_URL/trips" -H "Authorization: Bearer $STAFF_A_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"service_type\":\"LOCAL\",\"billing_mode\":\"GST\",\"customer_id\":\"$CUST_KA\",\"vehicle_id\":\"$VEH_S\",\"trip_date\":\"$YESTERDAY\",\"total_km\":70,\"total_hours\":6}" | jq -r '.trip.id // empty')
+RC_T_NULL=$(curl -s -X POST "$BASE_URL/trips" -H "Authorization: Bearer $STAFF_A_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"service_type\":\"LOCAL\",\"billing_mode\":\"GST\",\"customer_id\":\"$CUST_KA\",\"vehicle_id\":\"$VEH_S\",\"trip_date\":\"$YESTERDAY\",\"total_km\":70,\"total_hours\":6}" | jq -r '.trip.id // empty')
+for t in "$RC_T_TRUE" "$RC_T_FALSE" "$RC_T_NULL"; do
+  curl -s -X POST "$BASE_URL/trips/$t/finalize" -H "Authorization: Bearer $OWNER_A_TOKEN" > /dev/null
+done
+
+RC_INV_TRUE=$(curl -s -X POST "$BASE_URL/invoices" -H "Authorization: Bearer $ACCT_A_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"invoice_type\":\"TAX\",\"customer_id\":\"$CUST_KA\",\"trip_sheet_ids\":[\"$RC_T_TRUE\"],\"reverse_charge\":true}")
+RC_INV_TRUE_ID=$(echo "$RC_INV_TRUE" | jq -r '.invoice.id // empty')
+RC_INV_TRUE_VALUE=$(echo "$RC_INV_TRUE" | jq -r '.invoice.reverse_charge')
+
+if [ -n "$RC_INV_TRUE_ID" ] && [ "$RC_INV_TRUE_VALUE" = "true" ]; then
+  pass "POST /invoices with reverse_charge=true (Task 4.8): stores and returns true"
+else
+  fail "POST /invoices with reverse_charge=true (Task 4.8)" "id '$RC_INV_TRUE_ID', reverse_charge '$RC_INV_TRUE_VALUE'"
+fi
+
+RC_INV_FALSE=$(curl -s -X POST "$BASE_URL/invoices" -H "Authorization: Bearer $ACCT_A_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"invoice_type\":\"TAX\",\"customer_id\":\"$CUST_KA\",\"trip_sheet_ids\":[\"$RC_T_FALSE\"],\"reverse_charge\":false}")
+RC_INV_FALSE_ID=$(echo "$RC_INV_FALSE" | jq -r '.invoice.id // empty')
+RC_INV_FALSE_VALUE=$(echo "$RC_INV_FALSE" | jq -r '.invoice.reverse_charge')
+
+if [ -n "$RC_INV_FALSE_ID" ] && [ "$RC_INV_FALSE_VALUE" = "false" ]; then
+  pass "POST /invoices with reverse_charge=false (Task 4.8): stores and returns false"
+else
+  fail "POST /invoices with reverse_charge=false (Task 4.8)" "id '$RC_INV_FALSE_ID', reverse_charge '$RC_INV_FALSE_VALUE'"
+fi
+
+RC_INV_NULL=$(curl -s -X POST "$BASE_URL/invoices" -H "Authorization: Bearer $ACCT_A_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"invoice_type\":\"TAX\",\"customer_id\":\"$CUST_KA\",\"trip_sheet_ids\":[\"$RC_T_NULL\"]}")
+RC_INV_NULL_ID=$(echo "$RC_INV_NULL" | jq -r '.invoice.id // empty')
+RC_INV_NULL_VALUE=$(echo "$RC_INV_NULL" | jq -r '.invoice.reverse_charge')
+
+if [ -n "$RC_INV_NULL_ID" ] && [ "$RC_INV_NULL_VALUE" = "null" ]; then
+  pass "POST /invoices without reverse_charge (Task 4.8): stores and returns null (never defaulted/guessed)"
+else
+  fail "POST /invoices without reverse_charge (Task 4.8)" "id '$RC_INV_NULL_ID', reverse_charge '$RC_INV_NULL_VALUE'"
+fi
+
+# GET roundtrip on the null case, and a PATCH flipping it to true.
+RC_GET_NULL_VALUE=$(curl -s "$BASE_URL/invoices/$RC_INV_NULL_ID" -H "Authorization: Bearer $ACCT_A_TOKEN" | jq -r '.invoice.reverse_charge')
+RC_PATCH=$(curl -s -X PATCH "$BASE_URL/invoices/$RC_INV_NULL_ID" -H "Authorization: Bearer $ACCT_A_TOKEN" -H "Content-Type: application/json" \
+  -d '{"reverse_charge":true}')
+RC_PATCH_VALUE=$(echo "$RC_PATCH" | jq -r '.invoice.reverse_charge')
+
+if [ "$RC_GET_NULL_VALUE" = "null" ] && [ "$RC_PATCH_VALUE" = "true" ]; then
+  pass "GET /invoices/:id reverse_charge=null roundtrips, PATCH reverse_charge=true updates it (Task 4.8)"
+else
+  fail "reverse_charge GET/PATCH roundtrip (Task 4.8)" "GET null-case '$RC_GET_NULL_VALUE', PATCH result '$RC_PATCH_VALUE'"
 fi
 
 # ─── SUMMARY ───

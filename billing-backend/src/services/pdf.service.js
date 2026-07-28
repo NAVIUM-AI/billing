@@ -265,6 +265,18 @@ function buildInvoiceRenderContext(invoice, lines, templateName) {
     total_driver_batta_paise: totalDriverBattaPaise,
     placeOfSupplyStateName: customer.state_name,
     placeOfSupplyStateCode: customer.state_code,
+    // Task 4.8: computed here (not read as invoice.reverse_charge
+    // directly in the template) for the same reason
+    // placeOfSupplyStateName is computed here rather than left as a
+    // raw column read — shared/header.hbs is also used by
+    // credit-note.hbs, whose render context has no `invoice` at all,
+    // so a raw `invoice.reverse_charge` reference risks reintroducing
+    // the exact "partials inherit the full parent context" leak Task
+    // 4.7 already found and fixed for Place of Supply (see
+    // known-issues.md). Present only when explicitly true/false, never
+    // guessed — see invoice.validator.js's own comment on this field.
+    reverseChargePresent: invoice.reverse_charge !== null && invoice.reverse_charge !== undefined,
+    reverseChargeLabel: invoice.reverse_charge ? "Yes" : "No",
     subtotal_paise: invoice.subtotal_paise,
     cgst_paise: invoice.cgst_paise,
     sgst_paise: invoice.sgst_paise,

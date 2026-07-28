@@ -53,6 +53,7 @@ const DRAFT_UPDATABLE_COLUMNS = [
   "parking_manual_override",
   "permit_manual_override",
   "fasttag_manual_override",
+  "reverse_charge",
 ];
 
 /**
@@ -90,6 +91,7 @@ async function insertDraft(
     parkingManualOverride,
     permitManualOverride,
     fasttagManualOverride,
+    reverseCharge,
     createdBy,
   },
   client,
@@ -106,6 +108,7 @@ async function insertDraft(
        amount_in_words,
        toll_manual_override, parking_manual_override,
        permit_manual_override, fasttag_manual_override,
+       reverse_charge,
        created_by
      )
      VALUES (
@@ -119,7 +122,8 @@ async function insertDraft(
        $23,
        $24, $25,
        $26, $27,
-       $28
+       $28,
+       $29
      )
      RETURNING *`,
     [
@@ -150,6 +154,7 @@ async function insertDraft(
       Boolean(parkingManualOverride),
       Boolean(permitManualOverride),
       Boolean(fasttagManualOverride),
+      reverseCharge ?? null,
       createdBy || null,
     ],
   );
