@@ -27,7 +27,7 @@ RESET=$'\033[0m'
 
 PASS=0
 FAIL=0
-TOTAL_CHECKS=16
+TOTAL_CHECKS=19
 # See scripts/verify-auth.sh for why FAILED_STEPS is only ever expanded
 # with [@]/[*] behind a length check (bash 3.2 + `set -u` compatibility).
 FAILED_STEPS=()
@@ -124,6 +124,58 @@ if [ "$GET2_STATUS" = "200" ] && [ "$GET2_PREFIX" = "ACME" ]; then
   pass "GET /settings/business again: persisted invoice_prefix 'ACME'"
 else
   fail "GET /settings/business again: persisted invoice_prefix 'ACME'" "status '$GET2_STATUS', invoice_prefix '$GET2_PREFIX'"
+fi
+
+# ─── (Task 4.8) PATCH /settings/business with tagline/phone/jurisdiction
+#     + bank_details.pan → 200, all four roundtrip on GET ───
+PATCH_F28_STATUS=$(curl -s -o "$WORK_DIR/patch-f28.json" -w '%{http_code}' -X PATCH "$BASE_URL/settings/business" \
+  -H "Authorization: Bearer $OWNER_ACCESS" -H "Content-Type: application/json" \
+  -d '{"tagline":"Car Rental & Outstation Cab Services","phone":"+91-80-1234-5678","jurisdiction":"Bangalore","bank_details":{"account_name":"Acme Travels","account_number":"1234567890","ifsc":"HDFC0001234","bank_name":"HDFC","pan":"BQSPR7829H"}}')
+PATCH_F28_TAGLINE=$(jq -r '.profile.tagline // empty' "$WORK_DIR/patch-f28.json")
+PATCH_F28_PHONE=$(jq -r '.profile.phone // empty' "$WORK_DIR/patch-f28.json")
+PATCH_F28_JURISDICTION=$(jq -r '.profile.jurisdiction // empty' "$WORK_DIR/patch-f28.json")
+PATCH_F28_PAN=$(jq -r '.profile.bank_details.pan // empty' "$WORK_DIR/patch-f28.json")
+
+STEP_F28_REASONS=()
+[ "$PATCH_F28_STATUS" = "200" ] || STEP_F28_REASONS+=("expected status 200, got '$PATCH_F28_STATUS'")
+[ "$PATCH_F28_TAGLINE" = "Car Rental & Outstation Cab Services" ] || STEP_F28_REASONS+=("tagline not reflected (got '$PATCH_F28_TAGLINE')")
+[ "$PATCH_F28_PHONE" = "+91-80-1234-5678" ] || STEP_F28_REASONS+=("phone not reflected (got '$PATCH_F28_PHONE')")
+[ "$PATCH_F28_JURISDICTION" = "Bangalore" ] || STEP_F28_REASONS+=("jurisdiction not reflected (got '$PATCH_F28_JURISDICTION')")
+[ "$PATCH_F28_PAN" = "BQSPR7829H" ] || STEP_F28_REASONS+=("bank_details.pan not reflected (got '$PATCH_F28_PAN')")
+
+if [ ${#STEP_F28_REASONS[@]} -eq 0 ]; then
+  pass "PATCH /settings/business (Task 4.8): tagline/phone/jurisdiction/bank_details.pan reflected in response"
+else
+  fail "PATCH /settings/business (Task 4.8): tagline/phone/jurisdiction/bank_details.pan reflected in response" "$(IFS='; '; echo "${STEP_F28_REASONS[*]}")"
+fi
+
+# ─── (Task 4.8) GET /settings/business again → confirms persistence ───
+GET_F28_STATUS=$(curl -s -o "$WORK_DIR/get-f28.json" -w '%{http_code}' "$BASE_URL/settings/business" \
+  -H "Authorization: Bearer $OWNER_ACCESS")
+GET_F28_JURISDICTION=$(jq -r '.profile.jurisdiction // empty' "$WORK_DIR/get-f28.json")
+GET_F28_PAN=$(jq -r '.profile.bank_details.pan // empty' "$WORK_DIR/get-f28.json")
+
+if [ "$GET_F28_STATUS" = "200" ] && [ "$GET_F28_JURISDICTION" = "Bangalore" ] && [ "$GET_F28_PAN" = "BQSPR7829H" ]; then
+  pass "GET /settings/business again (Task 4.8): persisted jurisdiction + bank_details.pan"
+else
+  fail "GET /settings/business again (Task 4.8): persisted jurisdiction + bank_details.pan" "status '$GET_F28_STATUS', jurisdiction '$GET_F28_JURISDICTION', pan '$GET_F28_PAN'"
+fi
+
+# ─── (Task 4.8) PATCH with an invalid bank_details.pan → 400 VALIDATION_ERROR ───
+# Same generic-error-code convention as the (p) invalid-GSTIN check
+# below — this codebase validates every field shape through the one
+# Joi `validate` middleware, not a per-field error code (a deliberate
+# deviation from the task's own "400 INVALID_PAN" ask — see the PART B
+# commit's comment on bankDetailsSchema).
+BAD_PAN_STATUS=$(curl -s -o "$WORK_DIR/bad-pan.json" -w '%{http_code}' -X PATCH "$BASE_URL/settings/business" \
+  -H "Authorization: Bearer $OWNER_ACCESS" -H "Content-Type: application/json" \
+  -d '{"bank_details":{"pan":"NOTAPAN"}}')
+BAD_PAN_CODE=$(jq -r '.error.code // empty' "$WORK_DIR/bad-pan.json")
+
+if [ "$BAD_PAN_STATUS" = "400" ] && [ "$BAD_PAN_CODE" = "VALIDATION_ERROR" ]; then
+  pass "PATCH /settings/business with invalid bank_details.pan (Task 4.8): 400 VALIDATION_ERROR"
+else
+  fail "PATCH /settings/business with invalid bank_details.pan (Task 4.8): 400 VALIDATION_ERROR" "status '$BAD_PAN_STATUS', code '$BAD_PAN_CODE'"
 fi
 
 # ─── (e): POST /users as owner → 201 ───

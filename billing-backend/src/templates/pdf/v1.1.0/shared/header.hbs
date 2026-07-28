@@ -5,6 +5,12 @@
     </div>
     <div>
       <div class="header-tenant-name">{{tenant.name}}</div>
+      {{! Task 4.8: tagline/phone are business-identity info, not tax
+          info — shown on both Tax and Proforma docs alike, unlike the
+          GSTIN/PAN/State block below which stays gated on
+          hideTenantTaxInfo. }}
+      {{#if tenant.tagline}}<div class="header-tenant-tagline">{{tenant.tagline}}</div>{{/if}}
+      {{#if tenant.phone}}<div class="header-tenant-tagline">Phone: {{tenant.phone}}</div>{{/if}}
       {{! Task 4.7: Proforma invoices omit the tenant's own
           GSTIN/PAN/State — they aren't tax documents, so this
           identity/registration block has no purpose there. Callers
@@ -41,6 +47,22 @@
       <div>
         <span class="label">Place of Supply:</span>
         {{placeOfSupplyStateName}}{{#if placeOfSupplyStateCode}} ({{placeOfSupplyStateCode}}){{/if}}
+      </div>
+      {{/unless}}
+      {{/if}}
+      {{! Task 4.8: only rendered when the invoice explicitly set
+          reverse_charge (true or false) — see pdf.service.js's
+          reverseChargePresent comment. A NULL (the overwhelming
+          majority of existing + new invoices, since this is never
+          defaulted) renders nothing, same graceful-omission pattern as
+          every other never-fabricated field in this module. Gated on
+          hideTenantTaxInfo like Place of Supply — Proforma docs aren't
+          tax documents. }}
+      {{#if reverseChargePresent}}
+      {{#unless hideTenantTaxInfo}}
+      <div>
+        <span class="label">Reverse Charge:</span>
+        {{reverseChargeLabel}}
       </div>
       {{/unless}}
       {{/if}}

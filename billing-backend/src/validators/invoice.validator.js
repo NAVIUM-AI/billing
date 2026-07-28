@@ -61,6 +61,15 @@ const createInvoiceSchema = Joi.object({
   parking_rupees: Joi.number().min(0),
   permit_rupees: Joi.number().min(0),
   fasttag_rupees: Joi.number().min(0),
+
+  // Task 4.8: whether GST is payable by the recipient under the
+  // reverse-charge mechanism rather than the tenant (forward charge).
+  // Deliberately NOT derived/defaulted anywhere (see the Task 4.8
+  // migration's comment and known-issues.md's "Reverse Charge" deferred
+  // entry) — a wrong declaration on a real tax document is a
+  // compliance risk, so this stays exactly what the caller sends:
+  // true, false, or omitted/null (renders nothing on the PDF).
+  reverse_charge: Joi.boolean().allow(null),
 })
   .custom((value, helpers) => {
     if (value.invoice_date && value.due_date && value.due_date < value.invoice_date) {
@@ -94,6 +103,8 @@ const updateInvoiceSchema = Joi.object({
   parking_rupees: Joi.number().min(0),
   permit_rupees: Joi.number().min(0),
   fasttag_rupees: Joi.number().min(0),
+
+  reverse_charge: Joi.boolean().allow(null),
 })
   .unknown(false)
   .min(1)
