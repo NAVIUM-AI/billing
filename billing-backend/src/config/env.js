@@ -35,6 +35,7 @@ const env = {
     secure: process.env.COOKIE_SECURE === "true",
     domain: process.env.COOKIE_DOMAIN || "localhost",
   },
+  frontendUrl: process.env.FRONTEND_URL || "http://localhost:5173",
   pdfStorageRoot: process.env.PDF_STORAGE_ROOT
     ? path.resolve(process.env.PDF_STORAGE_ROOT)
     : path.join(process.cwd(), "pdf-storage"),
