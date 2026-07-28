@@ -22,13 +22,21 @@ const cookieParser = require("cookie-parser");
 const v1Router = require("./api/v1");
 const errorHandler = require("./middleware/errorHandler");
 const { apiError } = require("./utils/httpError");
+const env = require("./config/env");
 
 const app = express();
 
 // helmet sets a bunch of security-related HTTP headers by default;
 // cheap to add now and avoids having to remember it later.
 app.use(helmet());
-app.use(cors());
+// The frontend sends credentialed requests (withCredentials: true) so
+// the HttpOnly refresh_token cookie rides along with /auth/refresh —
+// browsers reject that combination outright if Access-Control-Allow-
+// Origin is the wildcard `*` (cors()'s default with no options), even
+// though a same-origin curl/Postman request would never notice the
+// gap. origin must reflect the actual configured frontend origin, and
+// credentials must be explicitly true, for the cookie to flow at all.
+app.use(cors({ origin: env.frontendUrl, credentials: true }));
 app.use(express.json());
 // Parses the refresh_token cookie into req.cookies for auth.routes.js —
 // must run before the /api/v1 mount, since that's where it's read.
