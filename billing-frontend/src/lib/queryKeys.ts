@@ -1,4 +1,7 @@
 import type { CustomerFilters } from "@/types/customer";
+import type { DriverFilters } from "@/types/driver";
+import type { RuleType, VehicleType } from "@/lib/constants/enums";
+import type { VehicleFilters } from "@/types/vehicle";
 
 // Standard TkDodo query-key-factory pattern. Invalidating
 // queryKeys.customers.all invalidates every customer-related query at
@@ -16,14 +19,31 @@ export const queryKeys = {
   },
   vehicles: {
     all: ["vehicles"] as const,
-    // Phase 3
+    lists: () => [...queryKeys.vehicles.all, "list"] as const,
+    list: (filters: VehicleFilters) => [...queryKeys.vehicles.lists(), filters] as const,
+    details: () => [...queryKeys.vehicles.all, "detail"] as const,
+    detail: (id: string) => [...queryKeys.vehicles.details(), id] as const,
   },
   drivers: {
     all: ["drivers"] as const,
-    // Phase 3
+    lists: () => [...queryKeys.drivers.all, "list"] as const,
+    list: (filters: DriverFilters) => [...queryKeys.drivers.lists(), filters] as const,
+    details: () => [...queryKeys.drivers.all, "detail"] as const,
+    detail: (id: string) => [...queryKeys.drivers.details(), id] as const,
   },
   pricingRules: {
     all: ["pricingRules"] as const,
-    // Phase 3
+    lists: () => [...queryKeys.pricingRules.all, "list"] as const,
+    // Phase 3's "list" IS effectively "current rules across combos"
+    // (activeOnly=true, no rule_type/vehicle_type filter) — still goes
+    // through the same list() key so a supersede mutation can
+    // invalidate every list variant at once via lists().
+    list: (activeOnly: boolean) => [...queryKeys.pricingRules.lists(), { activeOnly }] as const,
+    // One combo's FULL version history (all rows, current + superseded).
+    histories: () => [...queryKeys.pricingRules.all, "history"] as const,
+    history: (ruleType: RuleType, vehicleType: VehicleType) =>
+      [...queryKeys.pricingRules.histories(), ruleType, vehicleType] as const,
+    details: () => [...queryKeys.pricingRules.all, "detail"] as const,
+    detail: (id: string) => [...queryKeys.pricingRules.details(), id] as const,
   },
 };
