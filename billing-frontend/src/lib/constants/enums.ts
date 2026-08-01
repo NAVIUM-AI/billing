@@ -40,3 +40,37 @@ export const RULE_TYPE_LABELS: Record<RuleType, string> = {
   OUTSTATION_SLAB: "Outstation Slab",
   PERFORMANCE: "Performance",
 };
+
+// Mirrors billing-backend/src/validators/tripSheet.validator.js exactly.
+// IMPORTANT: there is no third "PERFORMANCE" service_type — that was an
+// incorrect assumption in an earlier draft of the F3 task spec.
+// service_type (LOCAL | OUTSTATION) and billing_mode (GST | PERFORMANCE)
+// are two INDEPENDENT axes on the same trip; PERFORMANCE is a billing
+// mode that applies to EITHER service type, not a service type itself.
+// See tripSheet.service.js#deriveRuleType for the authoritative mapping
+// (mirrored below in tripPricingCalc.ts).
+export const TRIP_SERVICE_TYPES = ["LOCAL", "OUTSTATION"] as const;
+export type TripServiceType = (typeof TRIP_SERVICE_TYPES)[number];
+
+export const TRIP_SERVICE_TYPE_LABELS: Record<TripServiceType, string> = {
+  LOCAL: "Local",
+  OUTSTATION: "Outstation",
+};
+
+export const TRIP_BILLING_MODES = ["GST", "PERFORMANCE"] as const;
+export type TripBillingMode = (typeof TRIP_BILLING_MODES)[number];
+
+export const TRIP_BILLING_MODE_LABELS: Record<TripBillingMode, string> = {
+  GST: "GST (Tax)",
+  PERFORMANCE: "Performance (Internal Cost)",
+};
+
+export const TRIP_STATUSES = ["DRAFT", "FINALIZED", "INVOICED", "CANCELLED"] as const;
+export type TripStatus = (typeof TRIP_STATUSES)[number];
+
+export const TRIP_STATUS_LABELS: Record<TripStatus, string> = {
+  DRAFT: "Draft",
+  FINALIZED: "Finalized",
+  INVOICED: "Invoiced",
+  CANCELLED: "Cancelled",
+};

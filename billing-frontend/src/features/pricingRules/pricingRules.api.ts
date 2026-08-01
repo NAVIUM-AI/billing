@@ -19,6 +19,7 @@
  *   for clarity at the call site.
  */
 import { apiClient } from "@/lib/api";
+import type { RuleType, VehicleType } from "@/lib/constants/enums";
 import {
   listPricingRulesResponseSchema,
   pricingRuleDetailResponseSchema,
@@ -74,6 +75,30 @@ export async function listPricingRules(filters: PricingRuleFilters): Promise<Pri
 export async function getPricingRule(id: string): Promise<PricingRule> {
   const res = await apiClient.get(`/pricing/rules/${id}`);
   return pricingRuleDetailResponseSchema.parse(res.data).rule as PricingRule;
+}
+
+// GET /pricing/rules/applicable — used by F3's trip create/edit forms
+// to look up the rule that will actually govern a trip's pricing (same
+// lookup tripSheet.service.js#createTripSheet itself does server-side).
+// Returns null on 404 NO_APPLICABLE_RULE rather than throwing — "no
+// rule configured yet" is an expected, common state for a fresh
+// service_type+vehicle_type combo, not an error condition for this
+// caller to propagate.
+export async function getApplicablePricingRule(
+  ruleType: RuleType,
+  vehicleType: VehicleType,
+  onDate?: string,
+): Promise<PricingRule | null> {
+  try {
+    const res = await apiClient.get("/pricing/rules/applicable", {
+      params: { rule_type: ruleType, vehicle_type: vehicleType, on_date: onDate || undefined },
+    });
+    return pricingRuleDetailResponseSchema.parse(res.data).rule as PricingRule;
+  } catch (err) {
+    const status = (err as { response?: { status?: number } })?.response?.status;
+    if (status === 404) return null;
+    throw err;
+  }
 }
 
 export async function createPricingRule(values: PricingRuleFormValues): Promise<PricingRule> {

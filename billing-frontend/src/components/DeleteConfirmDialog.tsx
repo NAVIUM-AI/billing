@@ -30,6 +30,15 @@ export function DeleteConfirmDialog({
   const panelRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
 
+  // Latest-ref pattern (F3 finding — see Modal.tsx's comment on the
+  // same bug class): keeps onOpenChange OUT of the effect's deps so an
+  // inline-callback caller can't cause this effect to re-run (and
+  // re-steal focus onto the panel) on every unrelated re-render.
+  const onOpenChangeRef = useRef(onOpenChange);
+  useEffect(() => {
+    onOpenChangeRef.current = onOpenChange;
+  }, [onOpenChange]);
+
   useEffect(() => {
     if (!open) return;
     const previouslyFocused = document.activeElement as HTMLElement | null;
@@ -37,7 +46,7 @@ export function DeleteConfirmDialog({
 
     function handleKeyDown(e: KeyboardEvent) {
       if (e.key === "Escape") {
-        onOpenChange(false);
+        onOpenChangeRef.current(false);
         return;
       }
       if (e.key === "Tab") {
@@ -60,7 +69,7 @@ export function DeleteConfirmDialog({
       document.removeEventListener("keydown", handleKeyDown);
       previouslyFocused?.focus();
     };
-  }, [open, onOpenChange]);
+  }, [open]);
 
   if (!open) return null;
 

@@ -35,6 +35,19 @@ export function Drawer({ open, onOpenChange, title, children, footer }: DrawerPr
     }
   }, [open, mounted]);
 
+  // Latest-ref pattern (F3 finding — see Modal.tsx's identical
+  // comment): keeps onOpenChange OUT of the focus-trap effect's deps,
+  // since a caller passing an inline arrow function gets a new
+  // identity every render — and if anything inside the drawer
+  // re-renders that caller on every keystroke, onOpenChange-in-deps
+  // would re-run this effect (and its panelRef.current?.focus() call)
+  // on every keystroke, stealing focus away from whatever the user is
+  // typing into.
+  const onOpenChangeRef = useRef(onOpenChange);
+  useEffect(() => {
+    onOpenChangeRef.current = onOpenChange;
+  }, [onOpenChange]);
+
   useEffect(() => {
     // `mounted` (not just `open`) is a real dependency here, not
     // decorative: `open` flips true one render BEFORE `mounted` does
@@ -52,7 +65,7 @@ export function Drawer({ open, onOpenChange, title, children, footer }: DrawerPr
 
     function handleKeyDown(e: KeyboardEvent) {
       if (e.key === "Escape") {
-        onOpenChange(false);
+        onOpenChangeRef.current(false);
         return;
       }
       if (e.key === "Tab") {
@@ -75,7 +88,7 @@ export function Drawer({ open, onOpenChange, title, children, footer }: DrawerPr
       document.removeEventListener("keydown", handleKeyDown);
       previouslyFocused?.focus();
     };
-  }, [open, mounted, onOpenChange]);
+  }, [open, mounted]);
 
   if (!mounted) return null;
 

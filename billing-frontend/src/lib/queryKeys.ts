@@ -1,6 +1,7 @@
 import type { CustomerFilters } from "@/types/customer";
 import type { DriverFilters } from "@/types/driver";
 import type { RuleType, VehicleType } from "@/lib/constants/enums";
+import type { TripSheetFilters } from "@/types/tripSheet";
 import type { VehicleFilters } from "@/types/vehicle";
 
 // Standard TkDodo query-key-factory pattern. Invalidating
@@ -45,5 +46,12 @@ export const queryKeys = {
       [...queryKeys.pricingRules.histories(), ruleType, vehicleType] as const,
     details: () => [...queryKeys.pricingRules.all, "detail"] as const,
     detail: (id: string) => [...queryKeys.pricingRules.details(), id] as const,
+  },
+  tripSheets: {
+    all: ["tripSheets"] as const,
+    lists: () => [...queryKeys.tripSheets.all, "list"] as const,
+    list: (filters: TripSheetFilters) => [...queryKeys.tripSheets.lists(), filters] as const,
+    details: () => [...queryKeys.tripSheets.all, "detail"] as const,
+    detail: (id: string) => [...queryKeys.tripSheets.details(), id] as const,
   },
 };
