@@ -7,6 +7,10 @@
         {{#if tenant.bank_details.account_number}}A/c No: {{tenant.bank_details.account_number}}<br>{{/if}}
         {{#if tenant.bank_details.bank_name}}Bank: {{tenant.bank_details.bank_name}}{{#if tenant.bank_details.branch}}, {{tenant.bank_details.branch}}{{/if}}<br>{{/if}}
         {{#if tenant.bank_details.ifsc}}IFSC: {{tenant.bank_details.ifsc}}<br>{{/if}}
+        {{! Task 4.8: the bank-account HOLDER's PAN — distinct from the
+            tenant's own PAN already shown in shared/header.hbs. See
+            known-issues.md's "Bank-details PAN" deferred entry. }}
+        {{#if tenant.bank_details.pan}}PAN: {{tenant.bank_details.pan}}<br>{{/if}}
         {{#if tenant.bank_details.upi_id}}UPI: {{tenant.bank_details.upi_id}}{{/if}}
       {{else}}
         (Bank details not configured)
@@ -22,3 +26,12 @@
     </div>
   </div>
 </div>
+{{! Task 4.8: "Subject to X jurisdiction" sentence — known-issues.md's
+    "Schema enrichment for tenant business info" deferred entry. Own
+    block below the two-column footer-wrap (not squeezed into either
+    column) since PTT-150/151 show it spanning the full footer width. }}
+{{#if tenant.jurisdiction}}
+<div class="footer-jurisdiction">
+  Subject to {{tenant.jurisdiction}} jurisdiction.
+</div>
+{{/if}}

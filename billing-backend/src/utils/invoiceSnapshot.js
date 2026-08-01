@@ -36,6 +36,13 @@ function buildTenantSnapshot(tenant) {
     pan: tenant.pan || null,
     state_code: tenant.state_code || null,
     logo_url: tenant.logo_url || null,
+    // Task 4.8: added once the schema actually gained these columns —
+    // see this file's own top comment for why address/phone/website
+    // were never fabricated here in the first place, and the Task 4.8
+    // migration for why only these three (not a full address) exist.
+    tagline: tenant.tagline || null,
+    phone: tenant.phone || null,
+    jurisdiction: tenant.jurisdiction || null,
     bank_details: tenant.bank_details || null,
     gst_rate: tenant.gst_rate,
     snapshotted_at: new Date().toISOString(),
