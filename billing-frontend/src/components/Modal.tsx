@@ -24,6 +24,24 @@ export function Modal({ open, onOpenChange, title, children, footer }: ModalProp
   const panelRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
 
+  // Latest-ref pattern: the focus-trap effect below reads
+  // onOpenChangeRef.current instead of taking onOpenChange as a
+  // dependency. A caller that passes an inline arrow function (rather
+  // than a stable useState setter) gets a NEW onOpenChange identity on
+  // every render — and if anything inside the modal re-renders that
+  // caller on every keystroke (e.g. a sibling useState the modal's own
+  // children update), onOpenChange-in-deps would re-run this effect on
+  // every keystroke, which calls panelRef.current?.focus() again and
+  // yanks focus from whatever the user is typing into back to the
+  // panel div. Caught by actually typing into a textarea inside a
+  // Modal in the browser, not by inspection — same "effect deps churn
+  // silently breaks focus" bug CLASS as the mounted-in-deps fix above,
+  // different trigger.
+  const onOpenChangeRef = useRef(onOpenChange);
+  useEffect(() => {
+    onOpenChangeRef.current = onOpenChange;
+  }, [onOpenChange]);
+
   useEffect(() => {
     if (open) {
       setMounted(true);
@@ -50,7 +68,7 @@ export function Modal({ open, onOpenChange, title, children, footer }: ModalProp
 
     function handleKeyDown(e: KeyboardEvent) {
       if (e.key === "Escape") {
-        onOpenChange(false);
+        onOpenChangeRef.current(false);
         return;
       }
       if (e.key === "Tab") {
@@ -73,7 +91,7 @@ export function Modal({ open, onOpenChange, title, children, footer }: ModalProp
       document.removeEventListener("keydown", handleKeyDown);
       previouslyFocused?.focus();
     };
-  }, [open, mounted, onOpenChange]);
+  }, [open, mounted]);
 
   if (!mounted) return null;
 

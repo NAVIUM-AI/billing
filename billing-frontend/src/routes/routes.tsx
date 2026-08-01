@@ -7,6 +7,9 @@ import { DriversListScreen } from "@/features/drivers/DriversListScreen";
 import { PricingRuleDetailPage } from "@/features/pricingRules/PricingRuleDetailPage";
 import { PricingRuleFormPage } from "@/features/pricingRules/PricingRuleFormPage";
 import { PricingRulesListScreen } from "@/features/pricingRules/PricingRulesListScreen";
+import { TripSheetDetailPage } from "@/features/tripSheets/TripSheetDetailPage";
+import { TripSheetFormPage } from "@/features/tripSheets/TripSheetFormPage";
+import { TripSheetsListScreen } from "@/features/tripSheets/TripSheetsListScreen";
 import { VehiclesListScreen } from "@/features/vehicles/VehiclesListScreen";
 import { ProtectedRoute } from "@/routes/ProtectedRoute";
 
@@ -27,6 +30,10 @@ export const router = createBrowserRouter([
       { path: "/pricing/new", element: <PricingRuleFormPage /> },
       { path: "/pricing/:id/new-version", element: <PricingRuleFormPage /> },
       { path: "/pricing/:ruleType/:vehicleType", element: <PricingRuleDetailPage /> },
+      { path: "/trips", element: <TripSheetsListScreen /> },
+      { path: "/trips/new", element: <TripSheetFormPage /> },
+      { path: "/trips/:id/edit", element: <TripSheetFormPage /> },
+      { path: "/trips/:id", element: <TripSheetDetailPage /> },
     ],
   },
   {

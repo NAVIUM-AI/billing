@@ -32,6 +32,21 @@ export function usePricingRule(id: string | undefined) {
   });
 }
 
+// Used by F3's trip create/edit forms for the live-total preview + the
+// rate fields shown alongside it. `null` (no rule configured yet) is a
+// valid, common result — see getApplicablePricingRule's own comment.
+export function useApplicablePricingRule(
+  ruleType: RuleType | undefined,
+  vehicleType: VehicleType | undefined,
+  onDate: string | undefined,
+) {
+  return useQuery({
+    queryKey: [...queryKeys.pricingRules.all, "applicable", ruleType, vehicleType, onDate] as const,
+    queryFn: () => pricingRulesApi.getApplicablePricingRule(ruleType as RuleType, vehicleType as VehicleType, onDate),
+    enabled: Boolean(ruleType && vehicleType),
+  });
+}
+
 export function useCreatePricingRule() {
   const queryClient = useQueryClient();
   return useMutation({
