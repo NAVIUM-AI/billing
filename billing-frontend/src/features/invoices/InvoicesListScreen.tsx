@@ -1,6 +1,6 @@
 import { Plus } from "lucide-react";
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 
 import { DataTable, type DataTableColumn } from "@/components/DataTable";
 import { PageHeader } from "@/components/PageHeader";
@@ -77,15 +77,26 @@ function InvoiceTypeBadge({ type }: { type: InvoiceType }) {
   );
 }
 
+// Shape of the location.state the dashboard's RevenueThisMonthWidget
+// navigates here with — a plain object, not a route/query param, per
+// this task's own "pick what fits your existing pattern" allowance.
+interface InvoicesNavFilters {
+  date_from?: string;
+  date_to?: string;
+}
+
 export function InvoicesListScreen() {
   const navigate = useNavigate();
+  const location = useLocation();
+  const navFilters = (location.state as InvoicesNavFilters | null) ?? null;
+
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<InvoiceStatus | undefined>(undefined);
   const [invoiceType, setInvoiceType] = useState<InvoiceType | undefined>(undefined);
   const [serviceType, setServiceType] = useState<TripServiceType | undefined>(undefined);
   const [customerId, setCustomerId] = useState<string | undefined>(undefined);
-  const [dateFrom, setDateFrom] = useState("");
-  const [dateTo, setDateTo] = useState("");
+  const [dateFrom, setDateFrom] = useState(navFilters?.date_from ?? "");
+  const [dateTo, setDateTo] = useState(navFilters?.date_to ?? "");
 
   const filters: InvoiceFilters = {
     search: search || undefined,
