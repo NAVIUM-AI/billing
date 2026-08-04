@@ -1,6 +1,7 @@
 import type { CustomerFilters } from "@/types/customer";
 import type { DriverFilters } from "@/types/driver";
 import type { InvoiceFilters } from "@/types/invoice";
+import type { PaymentFilters } from "@/types/payment";
 import type { RuleType, VehicleType } from "@/lib/constants/enums";
 import type { TripSheetFilters } from "@/types/tripSheet";
 import type { VehicleFilters } from "@/types/vehicle";
@@ -69,11 +70,31 @@ export const queryKeys = {
   },
   creditNotes: {
     all: ["creditNotes"] as const,
+    lists: () => [...queryKeys.creditNotes.all, "list"] as const,
+    list: (limit: number) => [...queryKeys.creditNotes.lists(), { limit }] as const,
     details: () => [...queryKeys.creditNotes.all, "detail"] as const,
     detail: (id: string) => [...queryKeys.creditNotes.details(), id] as const,
   },
   settings: {
     all: ["settings"] as const,
     businessProfile: () => [...queryKeys.settings.all, "businessProfile"] as const,
+  },
+  payments: {
+    all: ["payments"] as const,
+    lists: () => [...queryKeys.payments.all, "list"] as const,
+    list: (filters: PaymentFilters) => [...queryKeys.payments.lists(), filters] as const,
+    // Invoice-detail's own payment history — a distinct key from the
+    // generic list() above since it always passes a fixed
+    // status=RECORDED,CANCELLED filter (see payments.api.ts), not
+    // whatever the top-level Payments screen's filters currently are.
+    forInvoice: (invoiceId: string) => [...queryKeys.payments.all, "forInvoice", invoiceId] as const,
+  },
+  ledger: {
+    all: ["ledger"] as const,
+    detail: (customerId: string) => [...queryKeys.ledger.all, customerId] as const,
+  },
+  aging: {
+    all: ["aging"] as const,
+    report: (asOfDate?: string) => [...queryKeys.aging.all, asOfDate ?? null] as const,
   },
 };

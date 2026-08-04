@@ -17,7 +17,12 @@ import {
   useInvoice,
   useIssueInvoice,
 } from "@/features/invoices/invoices.hooks";
+import { CreditNoteDetailModal } from "@/features/creditNotes/CreditNoteDetailModal";
+import { CancelPaymentDialog } from "@/features/payments/CancelPaymentDialog";
+import { RecordPaymentDialog } from "@/features/payments/RecordPaymentDialog";
+import { useCancelPayment, usePaymentsForInvoice } from "@/features/payments/payments.hooks";
 import { formatPaiseAsRupees } from "@/lib/money";
+import { PAYMENT_MODE_LABELS } from "@/types/payment";
 import type { ApiErrorResponse } from "@/types/api";
 
 function extractApiMessage(err: unknown): string {
@@ -102,13 +107,29 @@ export function InvoiceDetailPage() {
   const generatePdf = useGenerateInvoicePdf();
   const downloadPdf = useDownloadInvoicePdf();
   const { data: creditNote } = useCreditNote(invoice?.credit_note_id ?? undefined);
+  const { data: paymentsData } = usePaymentsForInvoice(invoice?.id);
+  const cancelPayment = useCancelPayment();
 
   const [cancelOpen, setCancelOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [recordPaymentOpen, setRecordPaymentOpen] = useState(false);
+  const [cancellingPaymentId, setCancellingPaymentId] = useState<string | null>(null);
+  const [creditNoteModalOpen, setCreditNoteModalOpen] = useState(false);
 
   if (isLoading || !invoice) {
     return <p className="text-sm text-gray-500">Loading...</p>;
   }
+
+  const payments = paymentsData?.payments ?? [];
+  // Only RECORDED rows actually applied TO this invoice reduce the
+  // outstanding balance — a cancelled payment no longer counts, and a
+  // spillover advance (invoice_id null) was never applied here in the
+  // first place, so it can't appear in this filtered list anyway (see
+  // payments.api.ts#listPaymentsForInvoice).
+  const appliedPaise = payments
+    .filter((p) => p.status === "RECORDED")
+    .reduce((sum, p) => sum + p.amount_paise, 0);
+  const outstandingPaise = Math.max(0, invoice.net_payable_paise - appliedPaise);
 
   async function handleIssue() {
     try {
@@ -151,6 +172,17 @@ export function InvoiceDetailPage() {
   async function handleDownloadPdf() {
     try {
       await downloadPdf.mutateAsync(invoice!.id);
+    } catch (err) {
+      toast.error(extractApiMessage(err));
+    }
+  }
+
+  async function handleCancelPayment(reason: string) {
+    if (!cancellingPaymentId) return;
+    try {
+      await cancelPayment.mutateAsync({ paymentId: cancellingPaymentId, reason });
+      toast.success("Payment cancelled");
+      setCancellingPaymentId(null);
     } catch (err) {
       toast.error(extractApiMessage(err));
     }
@@ -288,9 +320,71 @@ export function InvoiceDetailPage() {
               <span>Net Payable</span>
               <span>{formatPaiseAsRupees(invoice.net_payable_paise)}</span>
             </div>
+            {(invoice.status === "ISSUED" || invoice.status === "PAID") && (
+              <div className="flex justify-between font-medium">
+                <span className={outstandingPaise > 0 ? "text-amber-700" : "text-green-700"}>Outstanding</span>
+                <span className={outstandingPaise > 0 ? "text-amber-700" : "text-green-700"}>
+                  {formatPaiseAsRupees(outstandingPaise)}
+                </span>
+              </div>
+            )}
             {invoice.amount_in_words && <p className="mt-1 text-xs text-gray-400">{invoice.amount_in_words}</p>}
           </div>
         </div>
+
+        {(invoice.status === "ISSUED" || invoice.status === "PAID") && (
+          <div className="rounded-lg border bg-white p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="text-sm font-semibold text-gray-700">Payments</h2>
+              {invoice.status === "ISSUED" && (
+                <Button size="sm" onClick={() => setRecordPaymentOpen(true)} className="bg-primary-500 hover:bg-primary-600">
+                  Record Payment
+                </Button>
+              )}
+            </div>
+            {payments.length === 0 ? (
+              <p className="text-sm text-gray-500">No payments recorded yet.</p>
+            ) : (
+              <div className="overflow-hidden rounded-md border">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b bg-gray-50 text-left text-gray-500">
+                      <th className="px-3 py-2 font-medium">Date</th>
+                      <th className="px-3 py-2 font-medium">Mode</th>
+                      <th className="px-3 py-2 font-medium">Reference</th>
+                      <th className="px-3 py-2 text-right font-medium">Amount</th>
+                      <th className="px-3 py-2 font-medium" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {payments.map((p) => (
+                      <tr
+                        key={p.id}
+                        className={`border-b last:border-0 ${p.status === "CANCELLED" ? "text-gray-400 line-through" : ""}`}
+                      >
+                        <td className="px-3 py-2">{new Date(p.received_at).toLocaleDateString()}</td>
+                        <td className="px-3 py-2">{PAYMENT_MODE_LABELS[p.payment_mode]}</td>
+                        <td className="px-3 py-2">{p.reference_number || "—"}</td>
+                        <td className="px-3 py-2 text-right">{formatPaiseAsRupees(p.amount_paise)}</td>
+                        <td className="px-3 py-2 text-right">
+                          {p.status === "RECORDED" && (
+                            <button
+                              type="button"
+                              onClick={() => setCancellingPaymentId(p.id)}
+                              className="text-xs font-medium text-red-600 hover:underline"
+                            >
+                              Cancel
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="rounded-lg border bg-white p-4">
           <h2 className="mb-3 text-sm font-semibold text-gray-700">Lifecycle</h2>
@@ -303,7 +397,18 @@ export function InvoiceDetailPage() {
                 <DetailRow label="Cancellation Reason" value={invoice.cancellation_reason} />
               </div>
             )}
-            {creditNote && <DetailRow label="Credit Note" value={creditNote.credit_note_number} />}
+            {creditNote && (
+              <div>
+                <div className="text-xs font-medium uppercase tracking-wide text-gray-400">Credit Note</div>
+                <button
+                  type="button"
+                  onClick={() => setCreditNoteModalOpen(true)}
+                  className="text-sm font-medium text-primary-600 hover:underline"
+                >
+                  {creditNote.credit_note_number}
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -322,6 +427,26 @@ export function InvoiceDetailPage() {
         description="This cannot be undone. Any held trips will be released and become invoiceable again."
         onConfirm={handleDelete}
         isLoading={deleteInvoice.isPending}
+      />
+
+      <RecordPaymentDialog
+        open={recordPaymentOpen}
+        onOpenChange={setRecordPaymentOpen}
+        invoiceId={invoice.id}
+        outstandingPaise={outstandingPaise}
+      />
+
+      <CancelPaymentDialog
+        open={Boolean(cancellingPaymentId)}
+        onOpenChange={(open) => !open && setCancellingPaymentId(null)}
+        onConfirm={handleCancelPayment}
+        isLoading={cancelPayment.isPending}
+      />
+
+      <CreditNoteDetailModal
+        open={creditNoteModalOpen}
+        onOpenChange={setCreditNoteModalOpen}
+        creditNoteId={invoice.credit_note_id}
       />
     </div>
   );
