@@ -8,6 +8,8 @@
 
 const Joi = require("joi");
 
+const { SERVICE_TYPES } = require("./tripSheet.validator");
+
 const INVOICE_TYPES = ["TAX", "PERFORMANCE"];
 
 /**
@@ -37,6 +39,14 @@ const createInvoiceSchema = Joi.object({
   invoice_type: Joi.string()
     .valid(...INVOICE_TYPES)
     .required(),
+
+  // Task 4.9: optional for backward compatibility with any pre-F4a
+  // caller — invoice.service.js derives it from the first selected
+  // trip's own service_type when omitted (same "first line is
+  // authoritative" reasoning pdf.service.js#pickInvoiceTemplateName
+  // already uses). The frontend always sends this explicitly.
+  service_type: Joi.string().valid(...SERVICE_TYPES),
+
   customer_id: Joi.string().guid({ version: "uuidv4" }).required(),
   trip_sheet_ids: Joi.array()
     .items(Joi.string().guid({ version: "uuidv4" }))
@@ -88,6 +98,13 @@ const createInvoiceSchema = Joi.object({
 // trip_sheet_ids, when present, is a FULL replacement of the trip set —
 // not a merge — per the task spec.
 const updateInvoiceSchema = Joi.object({
+  // Task 4.9: immutable, same pattern pricingRule.validator.js's
+  // updateRuleSchema uses for rule_type/vehicle_type — explicitly
+  // `.forbidden()` (not just omitted) so a request that tries to
+  // change it gets a clear field-specific error instead of the value
+  // being silently dropped.
+  service_type: Joi.any().forbidden(),
+
   trip_sheet_ids: Joi.array().items(Joi.string().guid({ version: "uuidv4" })).min(1).max(50),
 
   invoice_date: calendarDateField,
@@ -118,6 +135,46 @@ const updateInvoiceSchema = Joi.object({
     "object.min": "Provide at least one field to update.",
     "date.invalidCalendarDate": "must be a valid date in YYYY-MM-DD format",
     "date.dueBeforeInvoice": "due_date must be on or after invoice_date",
+  });
+
+// Task 4.9: GET /invoices — the tenant-wide list F4a's list screen
+// needs. Mirrors tripSheet.validator.js#listTripsQuerySchema's shape
+// (limit/offset/status/search/date range) as closely as this schema's
+// own fields allow — `status` here is a SINGLE value, not a
+// comma-separated multi-value list like trips', since invoice.
+// service.js's status filter is a plain equality match, not an ANY().
+const STATUS_VALUES = ["DRAFT", "ISSUED", "PAID", "CANCELLED"];
+
+const listInvoicesQuerySchema = Joi.object({
+  limit: Joi.number().integer().min(1).max(200).default(50),
+  offset: Joi.number().integer().min(0).default(0),
+
+  status: Joi.string().valid(...STATUS_VALUES),
+  invoice_type: Joi.string().valid(...INVOICE_TYPES),
+  service_type: Joi.string().valid(...SERVICE_TYPES),
+  customer_id: Joi.string().guid({ version: "uuidv4" }),
+
+  date_from: Joi.string().custom((val, helpers) => {
+    if (!isValidCalendarDate(val)) return helpers.error("date.invalidCalendarDate");
+    return val;
+  }),
+  date_to: Joi.string().custom((val, helpers) => {
+    if (!isValidCalendarDate(val)) return helpers.error("date.invalidCalendarDate");
+    return val;
+  }),
+
+  // Substring match on invoice_number — see invoice.repository.js#list.
+  search: Joi.string().trim().min(1).max(50),
+})
+  .custom((value, helpers) => {
+    if (value.date_from && value.date_to && value.date_from > value.date_to) {
+      return helpers.error("date.rangeInverted");
+    }
+    return value;
+  })
+  .messages({
+    "date.invalidCalendarDate": "must be a valid date in YYYY-MM-DD format",
+    "date.rangeInverted": "date_from must be on or before date_to",
   });
 
 const invoiceIdParamSchema = Joi.object({
@@ -168,4 +225,5 @@ module.exports = {
   updateLineSchema,
   issueInvoiceSchema,
   cancelInvoiceSchema,
+  listInvoicesQuerySchema,
 };

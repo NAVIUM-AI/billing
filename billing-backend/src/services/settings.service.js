@@ -35,6 +35,15 @@ function toProfile(tenant) {
     is_active,
     created_at,
     updated_at,
+    // Task 4.9: read-only here — F4a's invoice wizard needs the real
+    // rate for its live GST preview instead of guessing/hardcoding 5%.
+    // updateSettingsSchema deliberately does NOT list gst_rate, so
+    // PATCH /settings/business can't touch it (the shared validate()
+    // middleware's stripUnknown silently drops it, same as any other
+    // unlisted key on this particular schema — see that file's own
+    // comment on why it has no blanket `.unknown(false)`); changing
+    // the tenant's GST rate isn't a launch requirement.
+    gst_rate,
   } = tenant;
 
   return {
@@ -55,6 +64,7 @@ function toProfile(tenant) {
     is_active,
     created_at,
     updated_at,
+    gst_rate,
   };
 }
 

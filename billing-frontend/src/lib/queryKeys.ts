@@ -1,5 +1,6 @@
 import type { CustomerFilters } from "@/types/customer";
 import type { DriverFilters } from "@/types/driver";
+import type { InvoiceFilters } from "@/types/invoice";
 import type { RuleType, VehicleType } from "@/lib/constants/enums";
 import type { TripSheetFilters } from "@/types/tripSheet";
 import type { VehicleFilters } from "@/types/vehicle";
@@ -53,5 +54,26 @@ export const queryKeys = {
     list: (filters: TripSheetFilters) => [...queryKeys.tripSheets.lists(), filters] as const,
     details: () => [...queryKeys.tripSheets.all, "detail"] as const,
     detail: (id: string) => [...queryKeys.tripSheets.details(), id] as const,
+  },
+  invoices: {
+    all: ["invoices"] as const,
+    lists: () => [...queryKeys.invoices.all, "list"] as const,
+    list: (filters: InvoiceFilters) => [...queryKeys.invoices.lists(), filters] as const,
+    details: () => [...queryKeys.invoices.all, "detail"] as const,
+    detail: (id: string) => [...queryKeys.invoices.details(), id] as const,
+    // Task 4.2's picker — keyed by customer + the edit-mode escape
+    // hatch (invoiceId) since including THAT invoice's own held trips
+    // changes the eligible set.
+    invoiceableTrips: (customerId: string, invoiceId?: string) =>
+      [...queryKeys.invoices.all, "invoiceableTrips", customerId, invoiceId ?? null] as const,
+  },
+  creditNotes: {
+    all: ["creditNotes"] as const,
+    details: () => [...queryKeys.creditNotes.all, "detail"] as const,
+    detail: (id: string) => [...queryKeys.creditNotes.details(), id] as const,
+  },
+  settings: {
+    all: ["settings"] as const,
+    businessProfile: () => [...queryKeys.settings.all, "businessProfile"] as const,
   },
 };

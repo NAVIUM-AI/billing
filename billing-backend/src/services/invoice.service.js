@@ -389,6 +389,15 @@ async function createDraftInvoice(tenantId, input, actorUserId, db) {
 
     const tripsInOrder = await resolveTripsForInvoice(tenantId, tripSheetIds, null, customer.id, client);
 
+    // Task 4.9: service_type is a passive filter/display convenience —
+    // it has never gated which trips can go on an invoice (there is no
+    // MIXED_SERVICE_TYPES check anywhere in resolveTripsForInvoice, and
+    // this task doesn't add one). When the caller omits it, the first
+    // selected trip's own service_type is authoritative, same "first
+    // line wins" reasoning pdf.service.js#pickInvoiceTemplateName
+    // already uses for template selection.
+    const serviceType = input.service_type || tripsInOrder[0].service_type;
+
     const reimbursements = await computeEffectiveReimbursements({
       tenantId,
       tripIds: tripSheetIds,
@@ -417,6 +426,7 @@ async function createDraftInvoice(tenantId, input, actorUserId, db) {
       tenantId,
       {
         invoiceType: input.invoice_type,
+        serviceType,
         customerId: customer.id,
         invoiceDate,
         dueDate,
@@ -1030,6 +1040,50 @@ async function listCreditNotes(tenantId, query, db) {
   };
 }
 
+/**
+ * GET /invoices — Task 4.9. Tenant-wide list; the customer-scoped
+ * ledger (payment.service.js#getCustomerLedger) predates this and
+ * stays exactly as-is (F4b depends on it) — this is a separate,
+ * general-purpose browse/search view, not a replacement.
+ *
+ * @param {string} tenantId
+ * @param {object} query - validated listInvoicesQuerySchema output
+ * @param {{ withTenantContext: Function }} db
+ * @returns {Promise<{ invoices: object[], pagination: object }>}
+ */
+async function listInvoices(tenantId, query, db) {
+  const limit = query.limit ?? 50;
+  const offset = query.offset ?? 0;
+
+  const result = await db.withTenantContext((client) =>
+    invoiceRepo.list(
+      tenantId,
+      {
+        limit,
+        offset,
+        status: query.status ?? null,
+        invoiceType: query.invoice_type ?? null,
+        serviceType: query.service_type ?? null,
+        customerId: query.customer_id ?? null,
+        dateFrom: query.date_from ?? null,
+        dateTo: query.date_to ?? null,
+        search: query.search?.trim() || null,
+      },
+      client,
+    ),
+  );
+
+  return {
+    invoices: result.rows,
+    pagination: {
+      total: result.total,
+      limit,
+      offset,
+      has_more: offset + result.rows.length < result.total,
+    },
+  };
+}
+
 module.exports = {
   createDraftInvoice,
   getInvoice,
@@ -1041,4 +1095,5 @@ module.exports = {
   cancelInvoice,
   getCreditNote,
   listCreditNotes,
+  listInvoices,
 };

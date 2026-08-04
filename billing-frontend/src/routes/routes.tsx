@@ -4,6 +4,10 @@ import { LoginScreen } from "@/features/auth/LoginScreen";
 import { CustomersListScreen } from "@/features/customers/CustomersListScreen";
 import { DashboardPlaceholder } from "@/features/dashboard/DashboardPlaceholder";
 import { DriversListScreen } from "@/features/drivers/DriversListScreen";
+import { InvoiceDetailPage } from "@/features/invoices/InvoiceDetailPage";
+import { InvoiceDraftEditPage } from "@/features/invoices/InvoiceDraftEditPage";
+import { InvoiceWizardPage } from "@/features/invoices/InvoiceWizardPage";
+import { InvoicesListScreen } from "@/features/invoices/InvoicesListScreen";
 import { PricingRuleDetailPage } from "@/features/pricingRules/PricingRuleDetailPage";
 import { PricingRuleFormPage } from "@/features/pricingRules/PricingRuleFormPage";
 import { PricingRulesListScreen } from "@/features/pricingRules/PricingRulesListScreen";
@@ -34,6 +38,10 @@ export const router = createBrowserRouter([
       { path: "/trips/new", element: <TripSheetFormPage /> },
       { path: "/trips/:id/edit", element: <TripSheetFormPage /> },
       { path: "/trips/:id", element: <TripSheetDetailPage /> },
+      { path: "/invoices", element: <InvoicesListScreen /> },
+      { path: "/invoices/new", element: <InvoiceWizardPage /> },
+      { path: "/invoices/:id/edit", element: <InvoiceDraftEditPage /> },
+      { path: "/invoices/:id", element: <InvoiceDetailPage /> },
     ],
   },
   {
