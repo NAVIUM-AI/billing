@@ -20,15 +20,15 @@ interface NavItem {
   enabled: boolean;
 }
 
-// Invoices/Settings are still placeholders — their screens ship in F4.
-// Disabled rather than omitted so the full future nav shape is visible
-// from F1 onward (Rule: lock in architecture once). Customers enabled
-// in F2 Phase 2; Vehicles/Drivers/Pricing Rules enabled in F2 Phase 3;
-// Trip Sheets enabled in F3.
+// Settings is still a placeholder — its screen ships in F5. Disabled
+// rather than omitted so the full future nav shape is visible from F1
+// onward (Rule: lock in architecture once). Customers enabled in F2
+// Phase 2; Vehicles/Drivers/Pricing Rules enabled in F2 Phase 3; Trip
+// Sheets enabled in F3; Invoices enabled in F4a.
 const NAV_ITEMS: NavItem[] = [
   { label: "Dashboard", to: "/dashboard", icon: LayoutDashboard, enabled: true },
   { label: "Trip Sheets", to: "/trips", icon: FileText, enabled: true },
-  { label: "Invoices", to: "/invoices", icon: Receipt, enabled: false },
+  { label: "Invoices", to: "/invoices", icon: Receipt, enabled: true },
   { label: "Customers", to: "/customers", icon: Users, enabled: true },
   { label: "Vehicles", to: "/vehicles", icon: Car, enabled: true },
   { label: "Drivers", to: "/drivers", icon: IdCard, enabled: true },

@@ -66,6 +66,7 @@ async function insertDraft(
   tenantId,
   {
     invoiceType,
+    serviceType,
     customerId,
     invoiceDate,
     dueDate,
@@ -98,7 +99,7 @@ async function insertDraft(
 ) {
   const result = await client.query(
     `INSERT INTO invoices (
-       tenant_id, invoice_type, status, customer_id,
+       tenant_id, invoice_type, service_type, status, customer_id,
        invoice_date, due_date, notes, terms,
        subtotal_paise, gst_rate_snapshot,
        cgst_paise, sgst_paise, igst_paise, total_gst_paise,
@@ -112,23 +113,24 @@ async function insertDraft(
        created_by
      )
      VALUES (
-       $1, $2::invoice_type_enum, 'DRAFT'::invoice_status_enum, $3,
-       $4::date, $5::date, $6, $7,
-       $8, $9,
-       $10, $11, $12, $13,
-       $14, $15, $16, $17,
-       $18, $19,
-       $20, $21, $22,
-       $23,
-       $24, $25,
-       $26, $27,
-       $28,
-       $29
+       $1, $2::invoice_type_enum, $3, 'DRAFT'::invoice_status_enum, $4,
+       $5::date, $6::date, $7, $8,
+       $9, $10,
+       $11, $12, $13, $14,
+       $15, $16, $17, $18,
+       $19, $20,
+       $21, $22, $23,
+       $24,
+       $25, $26,
+       $27, $28,
+       $29,
+       $30
      )
      RETURNING *`,
     [
       tenantId,
       invoiceType,
+      serviceType || null,
       customerId,
       invoiceDate,
       dueDate,
@@ -318,4 +320,92 @@ async function transitionStatus(tenantId, id, fromStatus, toStatus, auditFields,
   }
 }
 
-module.exports = { insertDraft, findById, findByIdForUpdate, updateDraft, deleteDraft, transitionStatus };
+// Task 4.9: GET /invoices — tenant-wide list. Fixed-arity WHERE (Task
+// 2.2 convention) since every filter here is a simple presence check.
+// Uses COUNT(*) OVER() (a single query) rather than the separate
+// list+count query pair tripSheet.repository.js#list uses — either is
+// a legitimate way to get a filtered total; this task asked for the
+// window-function form specifically.
+//
+// gross_amount_paise in the SELECT list is an ALIAS, not a real
+// column — invoices has no column by that name (only
+// grand_total_paise, the pre-round-off figure, and net_payable_paise,
+// the actual amount payable after round-off). net_payable_paise is
+// aliased to gross_amount_paise here to match the response shape this
+// task specified; it is genuinely the more useful "headline amount"
+// for a list view (what's actually owed), not a fabricated number.
+async function list(
+  tenantId,
+  { limit, offset, status, invoiceType, serviceType, customerId, dateFrom, dateTo, search },
+  client,
+) {
+  const wheres = ["i.tenant_id = $1::uuid"];
+  const params = [tenantId];
+  let i = 2;
+
+  if (status) {
+    wheres.push(`i.status = $${i}::invoice_status_enum`);
+    params.push(status);
+    i++;
+  }
+  if (invoiceType) {
+    wheres.push(`i.invoice_type = $${i}::invoice_type_enum`);
+    params.push(invoiceType);
+    i++;
+  }
+  if (serviceType) {
+    wheres.push(`i.service_type = $${i}`);
+    params.push(serviceType);
+    i++;
+  }
+  if (customerId) {
+    wheres.push(`i.customer_id = $${i}::uuid`);
+    params.push(customerId);
+    i++;
+  }
+  if (dateFrom) {
+    wheres.push(`i.invoice_date >= $${i}::date`);
+    params.push(dateFrom);
+    i++;
+  }
+  if (dateTo) {
+    wheres.push(`i.invoice_date <= $${i}::date`);
+    params.push(dateTo);
+    i++;
+  }
+  if (search) {
+    wheres.push(`i.invoice_number ILIKE '%' || $${i} || '%'`);
+    params.push(search);
+    i++;
+  }
+
+  const whereClause = wheres.join(" AND ");
+
+  const result = await client.query(
+    `SELECT
+       i.id, i.invoice_number, i.invoice_type, i.service_type, i.status,
+       i.customer_id, c.company_name AS customer_company_name, c.name AS customer_personal_name,
+       i.invoice_date, i.net_payable_paise AS gross_amount_paise,
+       i.issued_at, i.cancelled_at, i.created_at, i.updated_at,
+       COUNT(*) OVER ()::bigint AS total_count
+     FROM invoices i
+     LEFT JOIN customers c ON c.id = i.customer_id
+     WHERE ${whereClause}
+     ORDER BY i.invoice_date DESC, i.created_at DESC
+     LIMIT $${i} OFFSET $${i + 1}`,
+    [...params, limit, offset],
+  );
+
+  const total = result.rows.length > 0 ? Number(result.rows[0].total_count) : 0;
+  const rows = result.rows.map(({ total_count, customer_company_name, customer_personal_name, ...row }) => ({
+    ...row,
+    // B2B customers carry company_name, B2C carry name — same
+    // "whichever is set" convention the frontend already applies
+    // elsewhere (e.g. CustomersListScreen's name column).
+    customer_name: customer_company_name || customer_personal_name || null,
+  }));
+
+  return { rows, total };
+}
+
+module.exports = { insertDraft, findById, findByIdForUpdate, updateDraft, deleteDraft, transitionStatus, list };

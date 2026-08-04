@@ -52,7 +52,7 @@ RESET=$'\033[0m'
 
 PASS=0
 FAIL=0
-TOTAL_CHECKS=32
+TOTAL_CHECKS=44
 FAILED_STEPS=()
 CREDIT_NOTE_COUNT=0
 
@@ -703,6 +703,163 @@ if [ ${#STEP30_REASONS[@]} -eq 0 ]; then
   pass "Regression: trip create/list, performance sheet, and invoiceable-picker finalize-gating (Modules 3/4.2) all still work"
 else
   fail "Regression checks (Step 30)" "$(IFS='; '; echo "${STEP30_REASONS[*]}")"
+fi
+
+# ─── Task 4.9: service_type on invoices + GET /invoices + gst_rate ───
+# Fresh tokens first — by this point the script has already done 30
+# steps of real work (including 5 concurrent issues), long enough that
+# the ORIGINAL OWNER_A_TOKEN/ACCT_A_TOKEN from setup can outlive the
+# access token's short expiry window (same class of issue
+# verify-rbac-settings.sh's own comments describe elsewhere). Re-login
+# rather than assume the old tokens are still good.
+OWNER_A_TOKEN=$(curl -s -X POST "$BASE_URL/auth/login" -H "Content-Type: application/json" \
+  -d "{\"email\":\"$OWNER_A_EMAIL\",\"password\":\"$TEST_PASSWORD\"}" | jq -r '.accessToken')
+ACCT_A_TOKEN=$(curl -s -X POST "$BASE_URL/auth/login" -H "Content-Type: application/json" \
+  -d "{\"email\":\"$ACCT_A_EMAIL\",\"password\":\"$TEST_PASSWORD\"}" | jq -r '.accessToken')
+
+# Step 31: POST /invoices with an explicit service_type persists + roundtrips.
+T_49_OUT=$(new_trip OUTSTATION GST "$CUST_A" "$VEH_K" "$YESTERDAY" 1750 0 ',"total_days":4')
+finalize_trip "$T_49_OUT"
+INV31_RESP=$(curl -s -X POST "$BASE_URL/invoices" -H "Authorization: Bearer $ACCT_A_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"invoice_type\":\"TAX\",\"service_type\":\"OUTSTATION\",\"customer_id\":\"$CUST_A\",\"trip_sheet_ids\":[\"$T_49_OUT\"]}")
+INV_49_OUT=$(echo "$INV31_RESP" | jq -r '.invoice.id')
+INV31_GET=$(curl -s "$BASE_URL/invoices/$INV_49_OUT" -H "Authorization: Bearer $ACCT_A_TOKEN")
+
+STEP31_REASONS=()
+[ "$(echo "$INV31_RESP" | jq -r '.invoice.service_type')" = "OUTSTATION" ] || STEP31_REASONS+=("create response service_type not OUTSTATION")
+[ "$(echo "$INV31_GET" | jq -r '.invoice.service_type')" = "OUTSTATION" ] || STEP31_REASONS+=("GET roundtrip service_type not OUTSTATION")
+if [ ${#STEP31_REASONS[@]} -eq 0 ]; then
+  pass "POST /invoices with explicit service_type persists and roundtrips (Task 4.9)"
+else
+  fail "POST /invoices with explicit service_type (Step 31)" "$(IFS='; '; echo "${STEP31_REASONS[*]}")"
+fi
+
+# Step 32: POST /invoices WITHOUT service_type derives it from the
+# first selected trip's own service_type (backward compat).
+T_49_LOCAL=$(new_trip LOCAL GST "$CUST_A" "$VEH_S" "$YESTERDAY" 70 6)
+finalize_trip "$T_49_LOCAL"
+INV32_RESP=$(curl -s -X POST "$BASE_URL/invoices" -H "Authorization: Bearer $ACCT_A_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"invoice_type\":\"TAX\",\"customer_id\":\"$CUST_A\",\"trip_sheet_ids\":[\"$T_49_LOCAL\"]}")
+INV_49_LOCAL=$(echo "$INV32_RESP" | jq -r '.invoice.id')
+if [ "$(echo "$INV32_RESP" | jq -r '.invoice.service_type')" = "LOCAL" ]; then
+  pass "POST /invoices without service_type derives LOCAL from the first trip (Task 4.9 backward compat)"
+else
+  fail "POST /invoices without service_type derives from trip (Step 32)" "got '$(echo "$INV32_RESP" | jq -r '.invoice.service_type')'"
+fi
+
+# Step 33: PATCH /invoices/:id with service_type -> 400, immutable.
+PATCH33_STATUS=$(curl -s -o "$WORK_DIR/patch33.json" -w '%{http_code}' -X PATCH "$BASE_URL/invoices/$INV_49_LOCAL" \
+  -H "Authorization: Bearer $ACCT_A_TOKEN" -H "Content-Type: application/json" -d '{"service_type":"OUTSTATION"}')
+PATCH33_CODE=$(jq -r '.error.code // empty' "$WORK_DIR/patch33.json")
+if [ "$PATCH33_STATUS" = "400" ] && [ "$PATCH33_CODE" = "VALIDATION_ERROR" ]; then
+  pass "PATCH /invoices/:id with service_type: 400 VALIDATION_ERROR (immutable, Task 4.9)"
+else
+  fail "PATCH invoice service_type immutability (Step 33)" "status '$PATCH33_STATUS', code '$PATCH33_CODE'"
+fi
+
+# Step 34: GET /invoices (tenant-wide list) returns invoices this
+# script itself just created — a self-consistency roundtrip (Rule 11),
+# not an independently re-derived total.
+LIST34=$(curl -s "$BASE_URL/invoices?limit=100" -H "Authorization: Bearer $OWNER_A_TOKEN")
+HAS_49_OUT=$(echo "$LIST34" | jq --arg id "$INV_49_OUT" '[.invoices[].id] | any(. == $id)')
+HAS_49_LOCAL=$(echo "$LIST34" | jq --arg id "$INV_49_LOCAL" '[.invoices[].id] | any(. == $id)')
+if [ "$HAS_49_OUT" = "true" ] && [ "$HAS_49_LOCAL" = "true" ]; then
+  pass "GET /invoices (tenant-wide) returns both invoices this run just created (Task 4.9)"
+else
+  fail "GET /invoices tenant-wide roundtrip (Step 34)" "has_out=$HAS_49_OUT has_local=$HAS_49_LOCAL"
+fi
+
+# Step 35: filter by status=DRAFT includes our fresh drafts.
+FILTER35=$(curl -s "$BASE_URL/invoices?status=DRAFT&limit=100" -H "Authorization: Bearer $OWNER_A_TOKEN")
+FILTER35_HAS=$(echo "$FILTER35" | jq --arg id "$INV_49_LOCAL" '[.invoices[].id] | any(. == $id)')
+FILTER35_ALL_DRAFT=$(echo "$FILTER35" | jq '[.invoices[].status] | all(. == "DRAFT")')
+if [ "$FILTER35_HAS" = "true" ] && [ "$FILTER35_ALL_DRAFT" = "true" ]; then
+  pass "GET /invoices?status=DRAFT: includes our fresh draft, every row is DRAFT"
+else
+  fail "GET /invoices status filter (Step 35)" "has=$FILTER35_HAS all_draft=$FILTER35_ALL_DRAFT"
+fi
+
+# Step 36: filter by invoice_type=TAX.
+FILTER36=$(curl -s "$BASE_URL/invoices?invoice_type=TAX&limit=100" -H "Authorization: Bearer $OWNER_A_TOKEN")
+FILTER36_ALL_TAX=$(echo "$FILTER36" | jq '[.invoices[].invoice_type] | all(. == "TAX")')
+if [ "$FILTER36_ALL_TAX" = "true" ]; then
+  pass "GET /invoices?invoice_type=TAX: every row is TAX"
+else
+  fail "GET /invoices invoice_type filter (Step 36)" "all_tax=$FILTER36_ALL_TAX"
+fi
+
+# Step 37: filter by service_type=OUTSTATION finds INV_49_OUT, excludes INV_49_LOCAL.
+FILTER37=$(curl -s "$BASE_URL/invoices?service_type=OUTSTATION&limit=100" -H "Authorization: Bearer $OWNER_A_TOKEN")
+FILTER37_HAS_OUT=$(echo "$FILTER37" | jq --arg id "$INV_49_OUT" '[.invoices[].id] | any(. == $id)')
+FILTER37_HAS_LOCAL=$(echo "$FILTER37" | jq --arg id "$INV_49_LOCAL" '[.invoices[].id] | any(. == $id)')
+if [ "$FILTER37_HAS_OUT" = "true" ] && [ "$FILTER37_HAS_LOCAL" = "false" ]; then
+  pass "GET /invoices?service_type=OUTSTATION: finds the OUTSTATION invoice, excludes the LOCAL one"
+else
+  fail "GET /invoices service_type filter (Step 37)" "has_out=$FILTER37_HAS_OUT has_local=$FILTER37_HAS_LOCAL"
+fi
+
+# Step 38: filter by customer_id.
+FILTER38=$(curl -s "$BASE_URL/invoices?customer_id=$CUST_A&limit=100" -H "Authorization: Bearer $OWNER_A_TOKEN")
+FILTER38_ALL_CUST_A=$(echo "$FILTER38" | jq --arg cid "$CUST_A" '[.invoices[].customer_id] | all(. == $cid)')
+if [ "$FILTER38_ALL_CUST_A" = "true" ]; then
+  pass "GET /invoices?customer_id=...: every row belongs to that customer"
+else
+  fail "GET /invoices customer_id filter (Step 38)" "all_cust_a=$FILTER38_ALL_CUST_A"
+fi
+
+# Step 39: search by (substring of) invoice_number — INV_1 was issued
+# earlier in this script and has a real invoice_number by now.
+INV1_NUMBER=$(curl -s "$BASE_URL/invoices/$INV_1" -H "Authorization: Bearer $OWNER_A_TOKEN" | jq -r '.invoice.invoice_number // empty')
+if [ -n "$INV1_NUMBER" ]; then
+  SEARCH_TOKEN=$(echo "$INV1_NUMBER" | sed -E 's#^([A-Za-z]+-[0-9]+).*#\1#')
+  FILTER39=$(curl -s "$BASE_URL/invoices?search=$SEARCH_TOKEN&limit=100" -H "Authorization: Bearer $OWNER_A_TOKEN")
+  FILTER39_HAS=$(echo "$FILTER39" | jq --arg id "$INV_1" '[.invoices[].id] | any(. == $id)')
+  if [ "$FILTER39_HAS" = "true" ]; then
+    pass "GET /invoices?search=$SEARCH_TOKEN: finds INV_1 by invoice_number substring"
+  else
+    fail "GET /invoices search filter (Step 39)" "token='$SEARCH_TOKEN', has=$FILTER39_HAS"
+  fi
+else
+  fail "GET /invoices search filter (Step 39)" "INV_1 has no invoice_number yet — earlier issue step may have failed"
+fi
+
+# Step 40: pagination — limit=1&offset=1 reports has_more correctly
+# against the SAME total the unpaginated call already reported.
+TOTAL40=$(echo "$LIST34" | jq -r '.pagination.total')
+PAGE40=$(curl -s "$BASE_URL/invoices?limit=1&offset=1" -H "Authorization: Bearer $OWNER_A_TOKEN")
+PAGE40_COUNT=$(echo "$PAGE40" | jq '.invoices | length')
+PAGE40_TOTAL=$(echo "$PAGE40" | jq -r '.pagination.total')
+PAGE40_HAS_MORE=$(echo "$PAGE40" | jq -r '.pagination.has_more')
+EXPECTED_HAS_MORE=$([ "$TOTAL40" -gt 2 ] && echo true || echo false)
+if [ "$PAGE40_COUNT" = "1" ] && [ "$PAGE40_TOTAL" = "$TOTAL40" ] && [ "$PAGE40_HAS_MORE" = "$EXPECTED_HAS_MORE" ]; then
+  pass "GET /invoices?limit=1&offset=1: 1 row, total matches, has_more=$EXPECTED_HAS_MORE correctly computed"
+else
+  fail "GET /invoices pagination (Step 40)" "count=$PAGE40_COUNT total=$PAGE40_TOTAL/$TOTAL40 has_more=$PAGE40_HAS_MORE/$EXPECTED_HAS_MORE"
+fi
+
+# Step 41: GET /settings/business exposes gst_rate.
+SETTINGS41=$(curl -s "$BASE_URL/settings/business" -H "Authorization: Bearer $OWNER_A_TOKEN")
+SETTINGS41_RATE=$(echo "$SETTINGS41" | jq -r '.profile.gst_rate // empty')
+if [ -n "$SETTINGS41_RATE" ]; then
+  pass "GET /settings/business exposes gst_rate ($SETTINGS41_RATE, Task 4.9)"
+else
+  fail "GET /settings/business gst_rate exposure (Step 41)" "profile.gst_rate missing"
+fi
+
+# Step 42: PATCH /settings/business with gst_rate (alongside a real,
+# allowed field) silently ignores gst_rate rather than changing it —
+# matches this schema's own existing convention (no blanket
+# .unknown(false), so an unlisted key is simply stripped, same as any
+# other field this schema has never listed), not a new .forbidden()
+# rejection.
+PATCH42=$(curl -s -X PATCH "$BASE_URL/settings/business" -H "Authorization: Bearer $OWNER_A_TOKEN" -H "Content-Type: application/json" \
+  -d '{"gst_rate":18,"invoice_prefix":"PATCH42"}')
+PATCH42_RATE=$(echo "$PATCH42" | jq -r '.profile.gst_rate // empty')
+PATCH42_PREFIX=$(echo "$PATCH42" | jq -r '.profile.invoice_prefix // empty')
+if [ "$PATCH42_RATE" = "$SETTINGS41_RATE" ] && [ "$PATCH42_PREFIX" = "PATCH42" ]; then
+  pass "PATCH /settings/business with gst_rate: silently ignored (still $SETTINGS41_RATE), other field still applies"
+else
+  fail "PATCH /settings/business gst_rate ignored (Step 42)" "rate stayed '$PATCH42_RATE' (expected '$SETTINGS41_RATE'), prefix '$PATCH42_PREFIX'"
 fi
 
 # ─── SUMMARY ───

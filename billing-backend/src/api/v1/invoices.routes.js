@@ -21,6 +21,7 @@ const {
   updateLineSchema,
   issueInvoiceSchema,
   cancelInvoiceSchema,
+  listInvoicesQuerySchema,
 } = require("../../validators/invoice.validator");
 const { recordPaymentSchema, applyAdvanceSchema } = require("../../validators/payment.validator");
 const invoiceService = require("../../services/invoice.service");
@@ -38,6 +39,19 @@ router.post(
   async (req, res) => {
     const invoice = await invoiceService.createDraftInvoice(req.tenantId, req.body, req.user.userId, req.db);
     res.status(201).json({ invoice });
+  },
+);
+
+// Task 4.9: tenant-wide browse/search — gated on reports:read (not
+// invoices:read) per this task's own instruction, distinct from every
+// single-invoice route below which stays on invoices:read.
+router.get(
+  "/",
+  requirePermission("reports:read"),
+  validate(listInvoicesQuerySchema, "query"),
+  async (req, res) => {
+    const result = await invoiceService.listInvoices(req.tenantId, req.query, req.db);
+    res.json(result);
   },
 );
 

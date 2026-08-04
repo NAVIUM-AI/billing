@@ -29,7 +29,7 @@ import {
 } from "@/lib/schemas/customer";
 import { cn } from "@/lib/utils";
 import type { ApiErrorResponse } from "@/types/api";
-import type { Customer } from "@/types/customer";
+import type { Customer, CustomerType } from "@/types/customer";
 
 interface CustomerFormDrawerProps {
   open: boolean;
@@ -39,6 +39,15 @@ interface CustomerFormDrawerProps {
   // via GET /:id?withContacts=true — the list row itself never carries
   // contacts (only the detail endpoint does).
   customerId?: string;
+  // F4a: create-mode-only pre-fill for the invoice wizard's "+ Add New"
+  // shortcut, so choosing B2B/B2C on Step 1 carries through instead of
+  // always defaulting to B2C. Ignored in edit mode.
+  defaultCustomerType?: CustomerType;
+  // F4a: fired after a successful CREATE (never on update) with the
+  // saved row, so a caller like the invoice wizard can auto-select the
+  // customer it just created instead of making the user re-open the
+  // dropdown.
+  onCreated?: (customer: Customer) => void;
 }
 
 const EMPTY_VALUES: CustomerFormValues = {
@@ -89,7 +98,13 @@ function extractApiError(err: unknown) {
   return undefined;
 }
 
-export function CustomerFormDrawer({ open, onOpenChange, customerId }: CustomerFormDrawerProps) {
+export function CustomerFormDrawer({
+  open,
+  onOpenChange,
+  customerId,
+  defaultCustomerType,
+  onCreated,
+}: CustomerFormDrawerProps) {
   const isEdit = Boolean(customerId);
   const { data: existingCustomer, isLoading: isLoadingCustomer } = useCustomer(customerId, true);
   const createCustomer = useCreateCustomer();
@@ -110,10 +125,10 @@ export function CustomerFormDrawer({ open, onOpenChange, customerId }: CustomerF
     if (isEdit && existingCustomer) {
       reset(customerToFormValues(existingCustomer));
     } else if (!isEdit) {
-      reset(EMPTY_VALUES);
+      reset({ ...EMPTY_VALUES, customer_type: defaultCustomerType ?? EMPTY_VALUES.customer_type });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, isEdit, existingCustomer?.id]);
+  }, [open, isEdit, existingCustomer?.id, defaultCustomerType]);
 
   // ─── Contacts (B2B only) ───
   // Existing, already-persisted contacts (fetched fresh via
@@ -181,6 +196,7 @@ export function CustomerFormDrawer({ open, onOpenChange, customerId }: CustomerF
       }
 
       toast.success(isEdit ? "Customer updated" : "Customer created");
+      if (!isEdit) onCreated?.(savedCustomer);
       onOpenChange(false);
     } catch (err) {
       const apiErr = extractApiError(err);
