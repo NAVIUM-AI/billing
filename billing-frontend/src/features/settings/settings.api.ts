@@ -23,5 +23,12 @@ export type BusinessProfile = z.infer<typeof businessProfileSchema>;
 
 export async function getBusinessProfile(): Promise<BusinessProfile> {
   const res = await apiClient.get("/settings/business");
-  return businessProfileSchema.parse(res.data);
+  // settings.routes.js wraps the profile: `res.json({ profile })`, not
+  // the bare object — parsing res.data directly (as this previously
+  // did) threw on every call and left the query silently in an error
+  // state (gst_rate is only ever read via optional chaining, so F4a's
+  // wizard never surfaced the failure). Found via F5's dashboard
+  // greeting, the first caller to render `profile.name` somewhere a
+  // human would actually notice it missing.
+  return businessProfileSchema.parse(res.data.profile);
 }

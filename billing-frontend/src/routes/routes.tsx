@@ -4,7 +4,7 @@ import { LoginScreen } from "@/features/auth/LoginScreen";
 import { CreditNotesListScreen } from "@/features/creditNotes/CreditNotesListScreen";
 import { CustomerLedgerScreen } from "@/features/customers/CustomerLedgerScreen";
 import { CustomersListScreen } from "@/features/customers/CustomersListScreen";
-import { DashboardPlaceholder } from "@/features/dashboard/DashboardPlaceholder";
+import { DashboardScreen } from "@/features/dashboard/DashboardScreen";
 import { DriversListScreen } from "@/features/drivers/DriversListScreen";
 import { InvoiceDetailPage } from "@/features/invoices/InvoiceDetailPage";
 import { InvoiceDraftEditPage } from "@/features/invoices/InvoiceDraftEditPage";
@@ -30,7 +30,7 @@ export const router = createBrowserRouter([
     element: <ProtectedRoute />,
     children: [
       { path: "/", element: <Navigate to="/dashboard" replace /> },
-      { path: "/dashboard", element: <DashboardPlaceholder /> },
+      { path: "/dashboard", element: <DashboardScreen /> },
       { path: "/customers", element: <CustomersListScreen /> },
       { path: "/customers/:id/ledger", element: <CustomerLedgerScreen /> },
       { path: "/vehicles", element: <VehiclesListScreen /> },
