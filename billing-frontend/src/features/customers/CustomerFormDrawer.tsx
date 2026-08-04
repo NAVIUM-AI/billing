@@ -4,6 +4,7 @@ import { AxiosError } from "axios";
 import { Trash2 } from "lucide-react";
 import { useEffect } from "react";
 import { FormProvider, useFieldArray, useForm, type Path } from "react-hook-form";
+import { Link } from "react-router-dom";
 import { toast } from "sonner";
 
 import { Drawer } from "@/components/Drawer";
@@ -246,18 +247,27 @@ export function CustomerFormDrawer({
       onOpenChange={onOpenChange}
       title={isEdit ? `Edit ${existingCustomer?.company_name || existingCustomer?.name || "Customer"}` : "New Customer"}
       footer={
-        <div className="flex justify-end gap-2">
-          <Button type="button" variant="secondary" onClick={() => onOpenChange(false)}>
-            Cancel
-          </Button>
-          <Button
-            type="submit"
-            form="customer-form"
-            disabled={isSaving || (isEdit && isLoadingCustomer)}
-            className="bg-primary-500 hover:bg-primary-600"
-          >
-            {isSaving ? "Saving..." : "Save"}
-          </Button>
+        <div className="flex items-center justify-between gap-2">
+          {isEdit ? (
+            <Link to={`/customers/${customerId}/ledger`} className="text-sm font-medium text-primary-600 hover:underline">
+              View Ledger
+            </Link>
+          ) : (
+            <span />
+          )}
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="secondary" onClick={() => onOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              form="customer-form"
+              disabled={isSaving || (isEdit && isLoadingCustomer)}
+              className="bg-primary-500 hover:bg-primary-600"
+            >
+              {isSaving ? "Saving..." : "Save"}
+            </Button>
+          </div>
         </div>
       }
     >

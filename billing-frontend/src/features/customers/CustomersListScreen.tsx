@@ -1,6 +1,7 @@
 import { AxiosError } from "axios";
 import { MoreHorizontal, Plus } from "lucide-react";
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 
 import { DataTable, type DataTableColumn } from "@/components/DataTable";
@@ -34,6 +35,7 @@ function TypeBadge({ type }: { type: CustomerType }) {
 }
 
 export function CustomersListScreen() {
+  const navigate = useNavigate();
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState<CustomerType | undefined>(undefined);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -127,6 +129,13 @@ export function CustomersListScreen() {
                   className="block w-full px-3 py-1.5 text-left text-sm hover:bg-gray-50"
                 >
                   Edit
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigate(`/customers/${c.id}/ledger`)}
+                  className="block w-full px-3 py-1.5 text-left text-sm hover:bg-gray-50"
+                >
+                  View Ledger
                 </button>
                 <button
                   type="button"
