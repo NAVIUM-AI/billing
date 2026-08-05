@@ -27,12 +27,29 @@ function errorHandler(err, req, res, next) {
   // mistakes (4xx) are expected traffic — log as warn so they don't
   // page anyone or drown out real failures.
   const logLevel = status >= 500 ? "error" : "warn";
+  // Stack/name/cause are logged SERVER-SIDE only for 5xx (they're never
+  // put in the client response outside dev — see below). This used to
+  // be missing entirely from the log line itself, not just the
+  // response: a caller whose catch block threw a brand new generic
+  // Error (as pdf.service.js's did before this fix) left production
+  // logs with no way to see what actually failed underneath. `cause`
+  // covers callers — like pdf.service.js now — that deliberately
+  // preserve the original error via `apiErr.cause = err`.
+  const stackDetails =
+    status >= 500
+      ? {
+          stack: err.stack,
+          name: err.name,
+          cause: err.cause ? { message: err.cause.message, stack: err.cause.stack, name: err.cause.name } : undefined,
+        }
+      : {};
   logger[logLevel]("Request failed", {
     status,
     code,
     message: err.message,
     path: req.originalUrl,
     method: req.method,
+    ...stackDetails,
   });
 
   const shouldMaskMessage = MASK_STATUSES.has(status);

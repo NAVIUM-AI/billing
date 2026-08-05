@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
+    "postinstall": "node scripts/postinstall-chrome.js",
     "migrate:up": "node-pg-migrate up",
     "migrate:down": "node-pg-migrate down",
     "migrate:create": "node-pg-migrate create",
@@ -35,6 +36,7 @@
   "license": "ISC",
   "description": "Multi-tenant billing SaaS backend.",
   "dependencies": {
+    "@puppeteer/browsers": "^2.13.2",
     "bcrypt": "^6.0.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
