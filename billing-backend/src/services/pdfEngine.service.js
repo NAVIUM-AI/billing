@@ -1,11 +1,20 @@
 /**
- * Puppeteer singleton + Handlebars template loader (Task 4.5).
+ * Puppeteer launcher + Handlebars template loader (Task 4.5).
  *
- * The browser is expensive to launch (~500ms) so we keep one instance
- * alive for the app's lifetime; pages within it are cheap and one is
- * opened per render, then closed. Compiled templates are cached by
- * (name, version) so repeat renders of the same template never re-hit
- * disk or re-compile.
+ * One browser is launched PER PDF request and closed when it's done
+ * (see renderHtmlToPdf) — NOT kept alive at module scope. That used to
+ * be a long-lived singleton (reused across requests, ~500ms saved per
+ * render), which is fine on a machine with headroom but is a real OOM
+ * risk on Render's free tier (512MB total, Chrome alone can hold
+ * 150-300MB resident even idle) — a crashed/leaked long-lived browser
+ * also silently degrades every subsequent request until the process
+ * restarts, which is a worse failure mode than a predictable ~500ms
+ * launch tax on each request. PDF generation is not a hot path here
+ * (fired once per invoice issue/regenerate, not per page view), so
+ * that tax is the right trade for this app. Compiled Handlebars
+ * templates are still cached by (name, version) at module scope — that
+ * cache is cheap (a few KB of compiled function, not a Chrome process)
+ * and safe to keep for the app's lifetime.
  *
  * Framework-agnostic on purpose (no req/res, no apiError here) — same
  * "pure engine, translate errors at the service boundary" split as
@@ -19,14 +28,17 @@
 // for 14+ minutes — a corporate-proxy-shaped failure, exactly what
 // Task 4.5's own spec anticipated). puppeteer-core skips that download
 // entirely and drives whatever Chrome/Chromium is already on the
-// machine instead (see findChromeExecutable below).
+// machine instead (see findChromeExecutable below). scripts/postinstall-
+// chrome.js is a best-effort, non-blocking install of one via
+// @puppeteer/browsers for environments (Render) that have neither a
+// system Chrome nor this repo's own local dev setup.
 const puppeteer = require("puppeteer-core");
 const handlebars = require("handlebars");
 const fs = require("fs").promises;
 const path = require("path");
+const os = require("os");
 const { existsSync } = require("fs");
 
-let browserInstance = null;
 const templateCache = new Map();
 
 // Bump on any layout change. A PDF regenerated for an already-issued
@@ -48,31 +60,78 @@ const CHROME_CANDIDATE_PATHS = [
   "/usr/bin/chromium-browser",
 ].filter(Boolean);
 
-function findChromeExecutable() {
-  const found = CHROME_CANDIDATE_PATHS.find((candidate) => existsSync(candidate));
-  if (!found) {
-    throw new Error(
-      "No Chrome/Chromium executable found for PDF rendering. Install Google Chrome, or set CHROME_EXECUTABLE_PATH to a Chromium binary.",
-    );
-  }
-  return found;
+// Cached resolution so every PDF request doesn't re-scan the
+// filesystem / re-query @puppeteer/browsers's cache metadata.
+let resolvedExecutablePath = null;
+
+/**
+ * Falls back to whatever scripts/postinstall-chrome.js (or a manual
+ * `npx puppeteer browsers install chrome`) put in the
+ * @puppeteer/browsers-managed cache dir — none of CHROME_CANDIDATE_PATHS'
+ * hardcoded system paths match where that installs Chrome, so without
+ * this a Render deploy that successfully ran the postinstall step
+ * would STILL 500 here, unable to find what it just downloaded.
+ */
+async function findManagedChromeExecutable() {
+  const { getInstalledBrowsers, Browser } = require("@puppeteer/browsers");
+  const cacheDir = process.env.PUPPETEER_CACHE_DIR || path.join(os.homedir(), ".cache", "puppeteer");
+  const installed = await getInstalledBrowsers({ cacheDir }).catch(() => []);
+  const chrome = installed.find((b) => b.browser === Browser.CHROME);
+  return chrome ? chrome.executablePath : null;
 }
 
-async function getBrowser() {
-  if (browserInstance) {
-    try {
-      await browserInstance.version();
-      return browserInstance;
-    } catch (e) {
-      browserInstance = null;
-    }
+async function findChromeExecutable() {
+  if (resolvedExecutablePath && existsSync(resolvedExecutablePath)) {
+    return resolvedExecutablePath;
   }
-  browserInstance = await puppeteer.launch({
-    executablePath: findChromeExecutable(),
+
+  const systemMatch = CHROME_CANDIDATE_PATHS.find((candidate) => existsSync(candidate));
+  if (systemMatch) {
+    resolvedExecutablePath = systemMatch;
+    return resolvedExecutablePath;
+  }
+
+  const managedMatch = await findManagedChromeExecutable();
+  if (managedMatch) {
+    resolvedExecutablePath = managedMatch;
+    return resolvedExecutablePath;
+  }
+
+  throw new Error(
+    "No Chrome/Chromium executable found for PDF rendering. Install Google Chrome, set CHROME_EXECUTABLE_PATH " +
+      "to a Chromium binary, or run `npx puppeteer browsers install chrome` (see scripts/postinstall-chrome.js).",
+  );
+}
+
+// `--single-process`/`--disable-gpu` are the standard recipe for
+// containerized Linux (Render, Docker) but reproducibly hang macOS
+// Chrome on page.setContent (verified locally: both flags individually
+// cause a networkidle0 timeout on this machine's Chrome) — gated to
+// Render's own environment (Render sets RENDER=true automatically) so
+// local dev keeps using the args that have always worked here, while
+// Render gets the flags it actually needs for its container.
+function launchArgs() {
+  const base = [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--no-zygote",
+    "--disable-accelerated-2d-canvas",
+    "--disable-web-security",
+  ];
+  if (process.env.RENDER === "true") {
+    base.push("--disable-gpu", "--single-process");
+  }
+  return base;
+}
+
+async function launchBrowser() {
+  const executablePath = await findChromeExecutable();
+  return puppeteer.launch({
+    executablePath,
     headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+    args: launchArgs(),
   });
-  return browserInstance;
 }
 
 // ─── Handlebars helpers ──────────────────────────────────────────────
@@ -145,26 +204,29 @@ async function loadTemplate(templateName, version) {
  * @returns {Promise<Buffer>}
  */
 async function renderHtmlToPdf(html, options = {}) {
-  const browser = await getBrowser();
-  const page = await browser.newPage();
+  const browser = await launchBrowser();
   try {
-    await page.setContent(html, { waitUntil: "networkidle0", timeout: 30000 });
-    return await page.pdf({
-      format: "A4",
-      printBackground: true,
-      margin: { top: "15mm", right: "10mm", bottom: "15mm", left: "10mm" },
-      ...options,
-    });
+    const page = await browser.newPage();
+    try {
+      await page.setContent(html, { waitUntil: "networkidle0", timeout: 30000 });
+      return await page.pdf({
+        format: "A4",
+        printBackground: true,
+        margin: { top: "15mm", right: "10mm", bottom: "15mm", left: "10mm" },
+        ...options,
+      });
+    } finally {
+      await page.close();
+    }
   } finally {
-    await page.close();
+    await browser.close();
   }
 }
 
-async function shutdown() {
-  if (browserInstance) {
-    await browserInstance.close();
-    browserInstance = null;
-  }
-}
+// No module-scope browser to close anymore (see top-of-file comment) —
+// kept as a no-op so server.js's SIGTERM/SIGINT handler doesn't need a
+// conditional require. If a render is genuinely in flight at shutdown,
+// its own `finally { await browser.close() }` above still runs it down.
+async function shutdown() {}
 
 module.exports = { loadTemplate, renderHtmlToPdf, shutdown, TEMPLATE_VERSION, registerPartial: (name, content) => handlebars.registerPartial(name, content) };

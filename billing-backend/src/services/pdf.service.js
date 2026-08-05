@@ -49,6 +49,7 @@ const creditNoteRepo = require("../repositories/creditNote.repository");
 const invoiceLineRepo = require("../repositories/invoiceLine.repository");
 const { apiError } = require("../utils/httpError");
 const { stateNameForCode } = require("../constants/gstStateCodes");
+const logger = require("../utils/logger");
 
 const VEHICLE_TYPE_LABELS = {
   SEDAN: "Sedan",
@@ -312,31 +313,80 @@ function buildCreditNoteRenderContext(creditNote, originalInvoice) {
 }
 
 /**
+ * Logs the ORIGINAL error (message/stack/name) plus correlation IDs
+ * before it gets translated into a generic, client-safe apiError below
+ * — this is what was missing: the previous catch blocks threw a brand
+ * new Error with none of the real Puppeteer/Handlebars failure
+ * attached, so Render's logs only ever showed "PDF_RENDER_FAILED" with
+ * no way to tell a sandbox crash from a template bug from a timeout.
+ * The original error is also attached as `.cause` on the thrown
+ * apiError so it survives into errorHandler.js's own "Request failed"
+ * log line as a second line of defense.
+ */
+function logAndWrapPdfError(stage, err, { templateName, templateVersion, correlation, code, message, details }) {
+  logger.error(`PDF generation failed: ${stage}`, {
+    err_message: err.message,
+    err_stack: err.stack,
+    err_name: err.name,
+    template: templateName,
+    template_version: templateVersion,
+    ...correlation,
+  });
+  const apiErr = apiError(500, code, message, details);
+  apiErr.cause = err;
+  return apiErr;
+}
+
+/**
  * Puppeteer/Handlebars failures (browser crash, page timeout, a
  * missing template file) are infrastructure failures, not domain
  * errors — translate them at this boundary so a template-engine
  * exception never reaches the client as a raw, uncoded 500 (Rule 5).
+ *
+ * @param {object} [correlation] - e.g. { tenantId, invoiceId } or
+ *   { tenantId, creditNoteId } — logged alongside every failure here so
+ *   a Render log line can be traced back to the exact document.
  */
-async function renderPdf(templateName, templateVersion, context) {
+async function renderPdf(templateName, templateVersion, context, correlation = {}) {
   await ensurePartialsLoaded(templateVersion);
   let template;
   try {
     template = await pdfEngine.loadTemplate(templateName, templateVersion);
   } catch (err) {
-    throw apiError(500, "PDF_TEMPLATE_ERROR", "Could not load the PDF template.", { template: templateName });
+    throw logAndWrapPdfError("template load", err, {
+      templateName,
+      templateVersion,
+      correlation,
+      code: "PDF_TEMPLATE_ERROR",
+      message: "Could not load the PDF template.",
+      details: { template: templateName },
+    });
   }
 
   let html;
   try {
     html = template(context);
   } catch (err) {
-    throw apiError(500, "PDF_TEMPLATE_ERROR", "Failed to render the PDF template.", { template: templateName });
+    throw logAndWrapPdfError("template compile/render", err, {
+      templateName,
+      templateVersion,
+      correlation,
+      code: "PDF_TEMPLATE_ERROR",
+      message: "Failed to render the PDF template.",
+      details: { template: templateName },
+    });
   }
 
   try {
     return await pdfEngine.renderHtmlToPdf(html);
   } catch (err) {
-    throw apiError(500, "PDF_RENDER_FAILED", "PDF rendering failed. Please retry.");
+    throw logAndWrapPdfError("Puppeteer render", err, {
+      templateName,
+      templateVersion,
+      correlation,
+      code: "PDF_RENDER_FAILED",
+      message: "PDF rendering failed. Please retry.",
+    });
   }
 }
 
@@ -375,7 +425,7 @@ async function generateInvoicePdf(tenantId, invoiceId, db) {
     const templateName = pickInvoiceTemplateName(invoice, lines, templateVersion);
     const context = buildInvoiceRenderContext(invoice, lines, templateName);
 
-    const pdfBuffer = await renderPdf(templateName, templateVersion, context);
+    const pdfBuffer = await renderPdf(templateName, templateVersion, context, { tenantId, invoiceId });
 
     const fileName = `${invoiceId}-${templateVersion}.pdf`;
     await writePdfFile(path.join(tenantId, "invoices"), fileName, pdfBuffer);
@@ -415,7 +465,7 @@ async function generateCreditNotePdf(tenantId, creditNoteId, db) {
     const templateVersion = creditNote.pdf_template_version || pdfEngine.TEMPLATE_VERSION;
     const context = buildCreditNoteRenderContext(creditNote, originalInvoice);
 
-    const pdfBuffer = await renderPdf("credit-note", templateVersion, context);
+    const pdfBuffer = await renderPdf("credit-note", templateVersion, context, { tenantId, creditNoteId });
 
     const fileName = `${creditNoteId}-${templateVersion}.pdf`;
     await writePdfFile(path.join(tenantId, "credit-notes"), fileName, pdfBuffer);
