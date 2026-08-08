@@ -129,7 +129,23 @@ export function TripSheetsListScreen() {
     { key: "service_type", label: "Service Type", render: (t) => <ServiceTypeBadge type={t.service_type} /> },
     { key: "billing_mode", label: "Billing Mode", render: (t) => <BillingModeBadge mode={t.billing_mode} /> },
     { key: "customer", label: "Customer", render: (t) => t.snapshot_customer_name || "—" },
-    { key: "vehicle", label: "Vehicle", render: (t) => t.snapshot_vehicle_number },
+    {
+      key: "vehicle",
+      label: "Vehicle",
+      render: (t) => (
+        <span className="inline-flex items-center gap-1.5">
+          {t.snapshot_vehicle_number}
+          {t.pricing_source === "MANUAL" && (
+            <span
+              className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-gray-500"
+              title="Sub-contracted vehicle, manually priced"
+            >
+              External
+            </span>
+          )}
+        </span>
+      ),
+    },
     { key: "amount", label: "Amount", render: (t) => formatPaiseAsRupees(t.net_payable_paise) },
     { key: "status", label: "Status", render: (t) => <StatusBadge status={t.status} /> },
   ];

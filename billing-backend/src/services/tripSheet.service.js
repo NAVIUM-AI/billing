@@ -58,6 +58,67 @@ function deriveRuleType(serviceType, billingMode) {
   throw new Error(`Unhandled service_type/billing_mode combination: ${serviceType}/${billingMode}`);
 }
 
+// undefined (field not sent — irrelevant to this trip's formula) stays
+// null, matching a fleet-mode pricing_rules row's own NULL-for-
+// irrelevant-fields shape (this function's two callers below both
+// mirror that same convention). rupeesToPaise itself throws on
+// undefined, so this guard is required, not just tidy.
+function rupeesOrNull(rupees) {
+  return rupees != null ? rupeesToPaise(rupees) : null;
+}
+
+/**
+ * Manual mode's rate fields reshaped into the same snake_case,
+ * paise-denominated shape a real pricing_rules row has — this is what
+ * lets computeTripTotals/the pure calculator run identically for
+ * fleet and manual trips (see resolveRuleForRecompute's own
+ * snapshot-fallback object for the shape this mirrors).
+ *
+ * @param {object} input - validated createTripSheetSchema output
+ * @returns {object}
+ */
+function buildManualRuleForCalc(input) {
+  return {
+    base_hours: input.base_hours ?? null,
+    base_km: input.base_km ?? null,
+    base_price_paise: rupeesOrNull(input.base_price_rupees),
+    extra_km_rate_paise: rupeesOrNull(input.extra_km_rate_rupees),
+    extra_hr_rate_paise: rupeesOrNull(input.extra_hr_rate_rupees),
+    slab_rate_paise: rupeesOrNull(input.slab_rate_rupees),
+    min_km_per_day: input.min_km_per_day ?? null,
+    driver_batta_per_day_paise: rupeesOrNull(input.driver_batta_per_day_rupees),
+    per_km_rate_paise: rupeesOrNull(input.per_km_rate_rupees),
+    performance_batta_paise: rupeesOrNull(input.performance_batta_rupees),
+  };
+}
+
+/**
+ * Same data as buildManualRuleForCalc, camelCased for
+ * tripSheet.repository.js#insert's `snap` param — the trip's own
+ * immutable audit-trail columns. Two parallel mappings from the same
+ * source, not one generic converter, mirroring how the fleet-mode
+ * branch below also builds ruleForCalc (snake_case, straight off the
+ * DB row) and snap (camelCase) as two separate object literals from
+ * the same `rule`.
+ *
+ * @param {object} input - validated createTripSheetSchema output
+ * @returns {object}
+ */
+function buildManualSnap(input) {
+  return {
+    baseHours: input.base_hours ?? null,
+    baseKm: input.base_km ?? null,
+    basePricePaise: rupeesOrNull(input.base_price_rupees),
+    extraKmRatePaise: rupeesOrNull(input.extra_km_rate_rupees),
+    extraHrRatePaise: rupeesOrNull(input.extra_hr_rate_rupees),
+    slabRatePaise: rupeesOrNull(input.slab_rate_rupees),
+    minKmPerDay: input.min_km_per_day ?? null,
+    driverBattaPerDayPaise: rupeesOrNull(input.driver_batta_per_day_rupees),
+    perKmRatePaise: rupeesOrNull(input.per_km_rate_rupees),
+    performanceBattaPaise: rupeesOrNull(input.performance_batta_rupees),
+  };
+}
+
 /**
  * Guard: assert that a trip's current status permits a transition to
  * `toStatus`. Throws a clean 409 with the state machine's own
@@ -179,6 +240,11 @@ async function createTripSheet(tenantId, input, actorUserId, db) {
       ? normalizedTolls.reduce((sum, t) => sum + t.amountPaise, 0)
       : explicitTollPaise;
 
+  // Manual mode detection: the validator's own cross-field .custom()
+  // check already guarantees exactly one of vehicle_id / manual_vehicle_*
+  // is present on a valid request — this just reads which one.
+  const isManual = input.manual_vehicle_number !== undefined;
+
   // Steps 4 + 5: Check (DB state) + Write, as one transaction.
   return db.withTenantContext(async (client) => {
     // (a) Customer.
@@ -187,14 +253,11 @@ async function createTripSheet(tenantId, input, actorUserId, db) {
       throw apiError(404, "CUSTOMER_NOT_FOUND", "Customer not found.");
     }
 
-    // (b) Vehicle.
-    const vehicle = await vehRepo.findById(tenantId, input.vehicle_id, client);
-    if (!vehicle || !vehicle.is_active) {
-      throw apiError(404, "VEHICLE_NOT_FOUND", "Vehicle not found.");
-    }
-
     // (c) Driver, if provided. Inactive drivers are allowed — a trip
     // may be backfilled against a driver who has since been archived.
+    // Unchanged by manual mode — driver stays optional either way (the
+    // frontend just hides the field in manual mode; the backend keeps
+    // full support for it, per this task's own instruction).
     let driverId = null;
     if (input.driver_id) {
       const driver = await drvRepo.findById(tenantId, input.driver_id, client);
@@ -204,26 +267,77 @@ async function createTripSheet(tenantId, input, actorUserId, db) {
       driverId = driver.id;
     }
 
-    // (d) Resolve the applicable pricing rule.
     const ruleType = deriveRuleType(serviceType, billingMode);
-    const rule = await ruleRepo.findApplicable(
-      tenantId,
-      { ruleType, vehicleType: vehicle.vehicle_type, onDate: input.trip_date },
-      client,
-    );
-    if (!rule) {
-      throw apiError(
-        400,
-        "NO_APPLICABLE_PRICING_RULE",
-        "No pricing rule found for this vehicle_type + rule_type on the trip date. Configure a rule in Settings → Pricing.",
-        { vehicle_type: vehicle.vehicle_type, rule_type: ruleType, on_date: input.trip_date },
+
+    let vehicleId;
+    let pricingRuleId;
+    let snapshotVehicleNumber;
+    let snapshotVehicleType;
+    let ruleForCalc;
+    let snap;
+
+    if (isManual) {
+      // (b)+(d) skipped entirely — no fleet vehicle lookup, no pricing
+      // rule lookup. The manual rate fields ARE the rule, built
+      // straight from validated request input instead of a DB row.
+      vehicleId = null;
+      pricingRuleId = null;
+      snapshotVehicleNumber = input.manual_vehicle_number;
+      snapshotVehicleType = input.manual_vehicle_type;
+      ruleForCalc = { rule_type: ruleType, ...buildManualRuleForCalc(input) };
+      snap = buildManualSnap(input);
+    } else {
+      // (b) Vehicle.
+      const vehicle = await vehRepo.findById(tenantId, input.vehicle_id, client);
+      if (!vehicle || !vehicle.is_active) {
+        throw apiError(404, "VEHICLE_NOT_FOUND", "Vehicle not found.");
+      }
+
+      // (d) Resolve the applicable pricing rule.
+      const rule = await ruleRepo.findApplicable(
+        tenantId,
+        { ruleType, vehicleType: vehicle.vehicle_type, onDate: input.trip_date },
+        client,
       );
+      if (!rule) {
+        throw apiError(
+          400,
+          "NO_APPLICABLE_PRICING_RULE",
+          "No pricing rule found for this vehicle_type + rule_type on the trip date. Configure a rule in Settings → Pricing.",
+          { vehicle_type: vehicle.vehicle_type, rule_type: ruleType, on_date: input.trip_date },
+        );
+      }
+
+      vehicleId = vehicle.id;
+      pricingRuleId = rule.id;
+      snapshotVehicleNumber = vehicle.vehicle_number;
+      snapshotVehicleType = vehicle.vehicle_type;
+      ruleForCalc = { rule_type: rule.rule_type, ...rule };
+      // Snapshot rule fields. The rule row already carries NULL for
+      // every field not relevant to its own rule_type (enforced by the
+      // pricing_rules per-type CHECK constraints), so copying the
+      // whole set of rate columns straight across is correct for
+      // every rule_type without branching here.
+      snap = {
+        baseHours: rule.base_hours,
+        baseKm: rule.base_km,
+        basePricePaise: rule.base_price_paise,
+        extraKmRatePaise: rule.extra_km_rate_paise,
+        extraHrRatePaise: rule.extra_hr_rate_paise,
+        slabRatePaise: rule.slab_rate_paise,
+        minKmPerDay: rule.min_km_per_day,
+        driverBattaPerDayPaise: rule.driver_batta_per_day_paise,
+        perKmRatePaise: rule.per_km_rate_paise,
+        performanceBattaPaise: rule.performance_batta_paise,
+      };
     }
 
     // (e) Compute pricing via the pure calculator, and (f) derive
     // computed totals from the result — shared with updateTripSheet's
-    // recompute so the two can never drift apart.
-    const ruleForCalc = { rule_type: rule.rule_type, ...rule };
+    // recompute so the two can never drift apart. Identical for both
+    // modes: ruleForCalc is either a real pricing_rules row (fleet) or
+    // the manual rate fields reshaped into the same rule-shaped object
+    // (manual) — the calculator itself has no idea which one it got.
     const { calcResult, totals } = computeTripTotals(ruleForCalc, ruleType, serviceType, billingMode, {
       totalKm: input.total_km,
       totalHours: input.total_hours,
@@ -242,24 +356,6 @@ async function createTripSheet(tenantId, input, actorUserId, db) {
     const seq = await seqRepo.allocateSeq(tenantId, fiscalYear, client);
     const tripSheetNumber = tsn.format(tenant.trip_sheet_prefix, seq, tripDateObj);
 
-    // (h) Snapshot rule fields. The rule row already carries NULL for
-    // every field not relevant to its own rule_type (enforced by the
-    // pricing_rules per-type CHECK constraints), so copying the whole
-    // set of rate columns straight across is correct for every
-    // rule_type without branching here.
-    const snap = {
-      baseHours: rule.base_hours,
-      baseKm: rule.base_km,
-      basePricePaise: rule.base_price_paise,
-      extraKmRatePaise: rule.extra_km_rate_paise,
-      extraHrRatePaise: rule.extra_hr_rate_paise,
-      slabRatePaise: rule.slab_rate_paise,
-      minKmPerDay: rule.min_km_per_day,
-      driverBattaPerDayPaise: rule.driver_batta_per_day_paise,
-      perKmRatePaise: rule.per_km_rate_paise,
-      performanceBattaPaise: rule.performance_batta_paise,
-    };
-
     // (i) Insert the trip, then its itemized tolls (if any) in the same
     // transaction — either both land or neither does.
     const trip = await tripRepo.insert(
@@ -269,11 +365,12 @@ async function createTripSheet(tenantId, input, actorUserId, db) {
         serviceType,
         billingMode,
         customerId: customer.id,
-        vehicleId: vehicle.id,
+        vehicleId,
         driverId,
-        pricingRuleId: rule.id,
-        snapshotVehicleNumber: vehicle.vehicle_number,
-        snapshotVehicleType: vehicle.vehicle_type,
+        pricingRuleId,
+        pricingSource: isManual ? "MANUAL" : "FLEET",
+        snapshotVehicleNumber,
+        snapshotVehicleType,
         snapshotCustomerName: customer.company_name || customer.name,
         snapshotCustomerGstin: customer.gstin,
         snap,

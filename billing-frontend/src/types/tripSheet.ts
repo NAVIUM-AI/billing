@@ -1,5 +1,13 @@
 import type { TripBillingMode, TripServiceType, TripStatus, VehicleType } from "@/lib/constants/enums";
 
+// Which code path priced this trip — trip-sheets-manual-mode migration.
+// FLEET is the pre-existing registered-vehicle + pricing-rule lookup
+// (still fully supported server-side, just no longer offered by this
+// form — see TripSheetFormPage.tsx's own top comment). MANUAL is a
+// sub-contracted/partner vehicle with per-trip negotiated rates typed
+// in by hand.
+export type PricingSource = "FLEET" | "MANUAL";
+
 // Field names match the real `trip_tolls` table exactly (Task 3.2
 // migration). No update lifecycle — tolls are append-once, delete-
 // with-parent (see tripToll.repository.js's own comment); an edit
@@ -33,9 +41,12 @@ export interface TripSheet {
   billing_mode: TripBillingMode;
   status: TripStatus;
   customer_id: string;
-  vehicle_id: string;
+  // Nullable for MANUAL-mode trips (trip-sheets-manual-mode migration
+  // dropped the NOT NULL constraint) — always non-null for FLEET.
+  vehicle_id: string | null;
   driver_id: string | null;
   pricing_rule_id: string | null;
+  pricing_source: PricingSource;
 
   snapshot_vehicle_number: string;
   snapshot_vehicle_type: VehicleType;
@@ -106,8 +117,9 @@ export interface TripSheetListRow {
   billing_mode: TripBillingMode;
   status: TripStatus;
   customer_id: string;
-  vehicle_id: string;
+  vehicle_id: string | null;
   driver_id: string | null;
+  pricing_source: PricingSource;
   snapshot_vehicle_number: string;
   snapshot_vehicle_type: VehicleType;
   snapshot_customer_name: string;

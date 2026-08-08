@@ -16,8 +16,41 @@
 
 const Joi = require("joi");
 
+const { VEHICLE_TYPES } = require("./vehicle.validator");
+
 const SERVICE_TYPES = ["LOCAL", "OUTSTATION"];
 const BILLING_MODES = ["GST", "PERFORMANCE"];
+
+// Mirrors tripSheet.service.js#deriveRuleType exactly — duplicated
+// here (rather than imported) because this file is deliberately
+// framework/business-logic-free (shape-only, per this file's own
+// top-of-file comment); the two must be kept in sync by hand if a new
+// service_type/billing_mode combination is ever added.
+function ruleTypeFor(serviceType, billingMode) {
+  if (serviceType === "LOCAL" && billingMode === "GST") return "LOCAL_PACKAGE";
+  if (serviceType === "OUTSTATION" && billingMode === "GST") return "OUTSTATION_SLAB";
+  return "PERFORMANCE";
+}
+
+// Which manual-mode rate fields are required for each formula. Mirrors
+// pricingRule.validator.js#rateAndLabelFields's own bounds
+// (.positive().max(1_000_000) for rupee fields, .integer().min(0).
+// max(10000) for plain counts) for consistency with the fleet-mode
+// equivalents of these same fields.
+const MANUAL_RATE_FIELDS_BY_FORMULA = {
+  LOCAL_PACKAGE: ["base_price_rupees", "base_hours", "base_km", "extra_km_rate_rupees", "extra_hr_rate_rupees"],
+  OUTSTATION_SLAB: ["slab_rate_rupees", "min_km_per_day", "driver_batta_per_day_rupees"],
+  // NOTE: performance_batta_rupees is a FLAT one-time amount, not a
+  // per-day rate — src/domain/pricing/performance.js#calculatePerformance
+  // uses rule.performance_batta_paise as-is with no total_days
+  // multiplication (confirmed by reading the actual calculator, Part
+  // A), unlike LOCAL_PACKAGE/OUTSTATION_SLAB's genuinely per-unit
+  // fields. Fleet-mode's own pricing_rules.performance_batta_rupees
+  // field (pricingRule.validator.js) has no "per day" semantics either
+  // — this mirrors that exactly rather than inventing a day-multiplier
+  // the real system doesn't have.
+  PERFORMANCE: ["per_km_rate_rupees", "performance_batta_rupees"],
+};
 
 /**
  * Real-calendar-date check using explicit UTC accessors throughout
@@ -94,8 +127,41 @@ const createTripSheetSchema = Joi.object({
     .required(),
 
   customer_id: Joi.string().guid({ version: "uuidv4" }).required(),
-  vehicle_id: Joi.string().guid({ version: "uuidv4" }).required(),
+  // Required in fleet mode, absent in manual mode — enforced by the
+  // cross-field .custom() below, not .required() here (Joi field-level
+  // .required() can't express "required unless these OTHER fields are
+  // present instead").
+  vehicle_id: Joi.string().guid({ version: "uuidv4" }),
   driver_id: Joi.string().guid({ version: "uuidv4" }).allow(null),
+
+  // ─── Manual mode (sub-contracted/partner vehicles) ───
+  // Deliberately looser than vehicles.vehicle_number's own
+  // isValidCanonical() Indian-plate-format check (utils/vehicleNumber.js)
+  // — a partner operator's vehicle may not follow that format at all,
+  // and this task's own spec asks for exactly "uppercase, 3-20 chars",
+  // nothing stricter.
+  manual_vehicle_number: Joi.string().trim().uppercase().min(3).max(20),
+  manual_vehicle_type: Joi.string().valid(...VEHICLE_TYPES),
+
+  // Manual per-trip rate fields, one group per formula — see
+  // MANUAL_RATE_FIELDS_BY_FORMULA for which are required for a given
+  // service_type/billing_mode. Rupee inputs stay rupees here and
+  // convert to paise in tripSheet.service.js (rupeesToPaise), matching
+  // every other _rupees field already on this schema (toll_rupees,
+  // parking_rupees, etc.) — NOT converted at this validator boundary,
+  // despite this task's own instruction to do so, for consistency with
+  // this file's one real established convention (see PART A/Rule 10
+  // note in the task debrief).
+  base_price_rupees: Joi.number().positive().max(1_000_000),
+  base_hours: Joi.number().integer().min(0).max(10000),
+  base_km: Joi.number().integer().min(0).max(10000),
+  extra_km_rate_rupees: Joi.number().positive().max(1_000_000),
+  extra_hr_rate_rupees: Joi.number().positive().max(1_000_000),
+  slab_rate_rupees: Joi.number().positive().max(1_000_000),
+  min_km_per_day: Joi.number().integer().min(0).max(10000),
+  driver_batta_per_day_rupees: Joi.number().positive().max(1_000_000),
+  per_km_rate_rupees: Joi.number().positive().max(1_000_000),
+  performance_batta_rupees: Joi.number().positive().max(1_000_000),
 
   trip_date: tripDateField.required(),
   // TIMESTAMPTZ columns, not plain DATE — no local-midnight shift risk,
@@ -130,7 +196,45 @@ const createTripSheetSchema = Joi.object({
   booked_by: Joi.string().max(255),
   pax_note: Joi.string().max(255),
   remarks: Joi.string().max(2000),
-});
+})
+  // Fleet vs. manual mode discriminator, plus per-formula required rate
+  // fields for manual mode. Cross-field (needs to compare vehicle_id
+  // against manual_vehicle_number/type, and rate fields against the
+  // service_type+billing_mode combo), so it lives in a schema-level
+  // .custom() rather than any single field's own rule — same reasoning
+  // as this file's existing date-range/toll-conflict .custom() checks.
+  .custom((value, helpers) => {
+    const hasVehicleId = value.vehicle_id !== undefined;
+    const hasManual = value.manual_vehicle_number !== undefined || value.manual_vehicle_type !== undefined;
+
+    if (hasVehicleId && hasManual) {
+      return helpers.error("manual.conflict");
+    }
+    if (!hasVehicleId && !hasManual) {
+      return helpers.error("manual.missing");
+    }
+
+    if (hasManual) {
+      if (value.manual_vehicle_number === undefined || value.manual_vehicle_type === undefined) {
+        return helpers.error("manual.incomplete");
+      }
+
+      const formula = ruleTypeFor(value.service_type, value.billing_mode);
+      const requiredFields = MANUAL_RATE_FIELDS_BY_FORMULA[formula];
+      const missing = requiredFields.filter((f) => value[f] === undefined);
+      if (missing.length > 0) {
+        return helpers.error("manual.rateFieldsMissing", { formula, missing: missing.join(", ") });
+      }
+    }
+
+    return value;
+  })
+  .messages({
+    "manual.conflict": "Provide either vehicle_id (fleet) OR manual_vehicle_number/manual_vehicle_type (manual) — not both.",
+    "manual.missing": "Provide either vehicle_id (fleet) OR manual_vehicle_number + manual_vehicle_type (manual).",
+    "manual.incomplete": "Manual mode requires both manual_vehicle_number and manual_vehicle_type.",
+    "manual.rateFieldsMissing": "Manual mode for this service_type/billing_mode ({{#formula}}) requires: {{#missing}}.",
+  });
 
 // All fields optional, editable-in-DRAFT versions of createTripSheetSchema's
 // data fields. Deliberately does NOT include service_type, billing_mode,

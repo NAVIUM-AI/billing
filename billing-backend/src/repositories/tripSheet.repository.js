@@ -76,6 +76,7 @@ async function insert(
     vehicleId,
     driverId,
     pricingRuleId,
+    pricingSource,
     snapshotVehicleNumber,
     snapshotVehicleType,
     snapshotCustomerName,
@@ -125,7 +126,8 @@ async function insert(
          toll_paise, parking_paise, permit_paise, fasttag_paise, advance_paise,
          base_amount_paise, extras_amount_paise, driver_batta_paise,
          subtotal_paise, gross_paise, net_payable_paise,
-         breakdown, booked_by, pax_note, remarks, created_by
+         breakdown, booked_by, pax_note, remarks, created_by,
+         pricing_source
        )
        VALUES (
          $1, $2, $3::trip_service_type_enum, $4::trip_billing_mode_enum,
@@ -142,7 +144,8 @@ async function insert(
          $31, $32, $33, $34, $35,
          $36, $37, $38,
          $39, $40, $41,
-         $42, $43, $44, $45, $46
+         $42, $43, $44, $45, $46,
+         $47
        )
        RETURNING *`,
       [
@@ -192,6 +195,7 @@ async function insert(
         paxNote || null,
         remarks || null,
         createdBy || null,
+        pricingSource || "FLEET",
       ],
     );
     return result.rows[0];
@@ -563,6 +567,7 @@ async function list(
        id, tenant_id, trip_sheet_number,
        service_type, billing_mode, status,
        customer_id, vehicle_id, driver_id,
+       pricing_source,
        snapshot_vehicle_number,
        snapshot_vehicle_type,
        snapshot_customer_name,

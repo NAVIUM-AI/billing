@@ -38,6 +38,21 @@ const NUMERIC_KEYS = [
   "permit_rupees",
   "fasttag_rupees",
   "advance_rupees",
+  // Manual mode's rate fields (trip-sheets-manual-mode) — create-only,
+  // same as manual_vehicle_number/manual_vehicle_type below. Only the
+  // active formula's fields are ever non-empty (the form only renders
+  // that formula's inputs), so omitEmptyStrings already drops the
+  // other two formulas' fields before this conversion runs.
+  "base_price_rupees",
+  "base_hours",
+  "base_km",
+  "extra_km_rate_rupees",
+  "extra_hr_rate_rupees",
+  "slab_rate_rupees",
+  "min_km_per_day",
+  "driver_batta_per_day_rupees",
+  "per_km_rate_rupees",
+  "performance_batta_rupees",
 ] as const;
 
 function omitEmptyStrings<T extends Record<string, unknown>>(obj: T): Partial<T> {
@@ -88,13 +103,33 @@ function toCreatePayload(values: TripSheetFormValues) {
   return toBasePayload(values);
 }
 
+const MANUAL_MODE_CREATE_ONLY_KEYS = [
+  "manual_vehicle_number",
+  "manual_vehicle_type",
+  "base_price_rupees",
+  "base_hours",
+  "base_km",
+  "extra_km_rate_rupees",
+  "extra_hr_rate_rupees",
+  "slab_rate_rupees",
+  "min_km_per_day",
+  "driver_batta_per_day_rupees",
+  "per_km_rate_rupees",
+  "performance_batta_rupees",
+] as const;
+
 function toUpdatePayload(values: TripSheetFormValues) {
   const payload = toBasePayload(values);
   // Create-only / immutable fields — see this file's top comment.
+  // updateTripSheetSchema doesn't declare vehicle/rate fields at all
+  // (same immutability as fleet mode's vehicle_id/pricing_rule_id —
+  // see tripSheet.repository.js#DRAFT_UPDATABLE_COLUMNS) and has
+  // .unknown(false), so sending any of these on PATCH 400s the whole
+  // request rather than being silently ignored.
   delete payload.service_type;
   delete payload.billing_mode;
   delete payload.customer_id;
-  delete payload.vehicle_id;
+  for (const key of MANUAL_MODE_CREATE_ONLY_KEYS) delete payload[key];
   // updateTripSheetSchema's tolls field has no default([]) — an
   // explicitly empty array still counts as "present" and triggers the
   // replace, which is what we want when the user removed every toll.

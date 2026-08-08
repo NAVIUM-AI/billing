@@ -13,8 +13,10 @@ import {
   TRIP_BILLING_MODE_LABELS,
   TRIP_SERVICE_TYPE_LABELS,
   TRIP_STATUS_LABELS,
+  VEHICLE_TYPE_LABELS,
 } from "@/lib/constants/enums";
 import { formatPaiseAsRupees } from "@/lib/money";
+import { deriveRuleType } from "@/lib/tripPricingCalc";
 import { cn } from "@/lib/utils";
 import type { ApiErrorResponse } from "@/types/api";
 
@@ -174,9 +176,52 @@ export function TripSheetDetailPage() {
             <DetailRow label="Trip Date" value={trip.trip_date} />
             <DetailRow label="Booked By" value={trip.booked_by} />
             <DetailRow label="Customer" value={trip.snapshot_customer_name} />
-            <DetailRow label="Vehicle" value={trip.snapshot_vehicle_number} />
+            <DetailRow
+              label="Vehicle"
+              value={
+                <span className="inline-flex items-center gap-1.5">
+                  {trip.snapshot_vehicle_number} · {VEHICLE_TYPE_LABELS[trip.snapshot_vehicle_type]}
+                  {trip.pricing_source === "MANUAL" && (
+                    <span
+                      className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-gray-500"
+                      title="Sub-contracted vehicle, manually priced"
+                    >
+                      External
+                    </span>
+                  )}
+                </span>
+              }
+            />
             <DetailRow label="Driver" value={driver?.full_name} />
             <DetailRow label="Notes" value={trip.remarks} />
+          </div>
+        </div>
+
+        <div className="rounded-lg border bg-white p-4">
+          <h2 className="mb-3 text-sm font-semibold text-gray-700">Rate Details</h2>
+          <div className="grid grid-cols-3 gap-4">
+            {deriveRuleType(trip.service_type, trip.billing_mode) === "LOCAL_PACKAGE" && (
+              <>
+                <DetailRow label="Base Price" value={formatPaiseAsRupees(trip.snap_base_price_paise)} />
+                <DetailRow label="Base Hours" value={trip.snap_base_hours} />
+                <DetailRow label="Base Km" value={trip.snap_base_km} />
+                <DetailRow label="Extra Km Rate" value={formatPaiseAsRupees(trip.snap_extra_km_rate_paise)} />
+                <DetailRow label="Extra Hour Rate" value={formatPaiseAsRupees(trip.snap_extra_hr_rate_paise)} />
+              </>
+            )}
+            {deriveRuleType(trip.service_type, trip.billing_mode) === "OUTSTATION_SLAB" && (
+              <>
+                <DetailRow label="Slab Rate" value={formatPaiseAsRupees(trip.snap_slab_rate_paise)} />
+                <DetailRow label="Min Km Per Day" value={trip.snap_min_km_per_day} />
+                <DetailRow label="Driver Batta Per Day" value={formatPaiseAsRupees(trip.snap_driver_batta_per_day_paise)} />
+              </>
+            )}
+            {deriveRuleType(trip.service_type, trip.billing_mode) === "PERFORMANCE" && (
+              <>
+                <DetailRow label="Per Km Rate" value={formatPaiseAsRupees(trip.snap_per_km_rate_paise)} />
+                <DetailRow label="Performance Batta" value={formatPaiseAsRupees(trip.snap_performance_batta_paise)} />
+              </>
+            )}
           </div>
         </div>
 

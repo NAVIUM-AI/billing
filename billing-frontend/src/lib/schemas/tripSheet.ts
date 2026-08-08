@@ -1,6 +1,20 @@
 import { z } from "zod";
 
 import { TRIP_BILLING_MODES, TRIP_SERVICE_TYPES, TRIP_STATUSES, VEHICLE_TYPES } from "@/lib/constants/enums";
+import { deriveRuleType } from "@/lib/tripPricingCalc";
+
+// Mirrors tripSheet.validator.js#MANUAL_RATE_FIELDS_BY_FORMULA exactly
+// — which manual rate fields are required for a given formula. Keyed
+// by RuleType (LOCAL_PACKAGE/OUTSTATION_SLAB/PERFORMANCE), same as the
+// backend.
+const MANUAL_RATE_FIELDS_BY_FORMULA = {
+  LOCAL_PACKAGE: ["base_price_rupees", "base_hours", "base_km", "extra_km_rate_rupees", "extra_hr_rate_rupees"],
+  OUTSTATION_SLAB: ["slab_rate_rupees", "min_km_per_day", "driver_batta_per_day_rupees"],
+  // performance_batta_rupees is a FLAT one-time amount, not "per day"
+  // — see tripSheet.validator.js's own comment (Part A finding: the
+  // real calculator never multiplies it by total_days).
+  PERFORMANCE: ["per_km_rate_rupees", "performance_batta_rupees"],
+} as const;
 
 function numericStringField(min: number, label: string, opts: { required?: boolean } = {}) {
   const base = z.string().refine((v) => {
@@ -44,8 +58,31 @@ export const tripSheetFormSchema = z
     billing_mode: z.enum(TRIP_BILLING_MODES),
 
     customer_id: z.string().min(1, "Customer is required"),
-    vehicle_id: z.string().min(1, "Vehicle is required"),
+
+    // Manual mode only (trip-sheets-manual-mode) — this form no longer
+    // offers a registered-fleet vehicle picker at all (see
+    // TripSheetFormPage.tsx's own top comment). driver_id stays in the
+    // schema — optional, submits null — even though no input renders
+    // for it; the backend keeps full support for it.
+    manual_vehicle_number: z.string().trim().min(3, "Required (min 3 characters)").max(20),
+    manual_vehicle_type: z.enum(VEHICLE_TYPES, { message: "Vehicle type is required" }),
     driver_id: z.string().optional().or(z.literal("")),
+
+    // Formula A (LOCAL_PACKAGE) fields.
+    base_price_rupees: numericStringField(0.01, "Base price"),
+    base_hours: numericStringField(0, "Base hours"),
+    base_km: numericStringField(0, "Base km"),
+    extra_km_rate_rupees: numericStringField(0, "Extra km rate"),
+    extra_hr_rate_rupees: numericStringField(0, "Extra hour rate"),
+    // Formula B (OUTSTATION_SLAB) fields.
+    slab_rate_rupees: numericStringField(0.01, "Slab rate"),
+    min_km_per_day: numericStringField(0, "Min km per day"),
+    driver_batta_per_day_rupees: numericStringField(0, "Driver batta"),
+    // Formula C (PERFORMANCE) fields — performance_batta_rupees is a
+    // FLAT one-time amount, not "per day" (see MANUAL_RATE_FIELDS_BY_
+    // FORMULA's own comment above).
+    per_km_rate_rupees: numericStringField(0.01, "Per km rate"),
+    performance_batta_rupees: numericStringField(0, "Performance batta"),
 
     trip_date: z
       .string()
@@ -73,6 +110,16 @@ export const tripSheetFormSchema = z
     remarks: z.string().max(2000).optional().or(z.literal("")),
   })
   .superRefine((data, ctx) => {
+    // Required manual rate fields for the active formula — mirrors
+    // tripSheet.validator.js's cross-field check exactly (same field
+    // list, same service_type+billing_mode -> formula mapping).
+    const formula = deriveRuleType(data.service_type, data.billing_mode);
+    for (const field of MANUAL_RATE_FIELDS_BY_FORMULA[formula]) {
+      if (!data[field]) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: "Required for this trip type" });
+      }
+    }
+
     if (data.opening_km && data.closing_km && Number(data.closing_km) < Number(data.opening_km)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -123,9 +170,10 @@ export const tripSheetResponseSchema = z.object({
   billing_mode: z.enum(TRIP_BILLING_MODES),
   status: z.enum(TRIP_STATUSES),
   customer_id: z.string().uuid(),
-  vehicle_id: z.string().uuid(),
+  vehicle_id: z.string().uuid().nullable(),
   driver_id: z.string().uuid().nullable(),
   pricing_rule_id: z.string().uuid().nullable(),
+  pricing_source: z.enum(["FLEET", "MANUAL"]),
 
   snapshot_vehicle_number: z.string(),
   snapshot_vehicle_type: z.enum(VEHICLE_TYPES),
@@ -194,8 +242,9 @@ const tripSheetListRowSchema = z.object({
   billing_mode: z.enum(TRIP_BILLING_MODES),
   status: z.enum(TRIP_STATUSES),
   customer_id: z.string().uuid(),
-  vehicle_id: z.string().uuid(),
+  vehicle_id: z.string().uuid().nullable(),
   driver_id: z.string().uuid().nullable(),
+  pricing_source: z.enum(["FLEET", "MANUAL"]),
   snapshot_vehicle_number: z.string(),
   snapshot_vehicle_type: z.enum(VEHICLE_TYPES),
   snapshot_customer_name: z.string(),
