@@ -24,10 +24,14 @@ import {
   tripSheetDetailResponseSchema,
   tripSheetListResponseSchema,
   type TripSheetFormValues,
+  type TripSheetVehicleFormValues,
 } from "@/lib/schemas/tripSheet";
 import type { TripSheet, TripSheetFilters, TripSheetListResponse, TripSheetListRow } from "@/types/tripSheet";
 
-const NUMERIC_KEYS = [
+// Task B1: every rate/usage/charge field lives inside a vehicle item
+// now — this is the per-VEHICLE numeric conversion list (mirrors the
+// old top-level NUMERIC_KEYS exactly, just scoped to one vehicle).
+const VEHICLE_NUMERIC_KEYS = [
   "total_km",
   "total_hours",
   "total_days",
@@ -36,11 +40,10 @@ const NUMERIC_KEYS = [
   "permit_rupees",
   "fasttag_rupees",
   "advance_rupees",
-  // Manual mode's rate fields (trip-sheets-manual-mode) — create-only,
-  // same as manual_vehicle_number/manual_vehicle_type below. Only the
-  // active formula's fields are ever non-empty (the form only renders
-  // that formula's inputs), so omitEmptyStrings already drops the
-  // other two formulas' fields before this conversion runs.
+  // Manual mode's rate fields. Only the active formula's fields are
+  // ever non-empty (the form only renders that formula's inputs), so
+  // omitEmptyStrings already drops the other two formulas' fields
+  // before this conversion runs.
   "base_price_rupees",
   "base_hours",
   "base_km",
@@ -79,19 +82,24 @@ function tollsToWire(tolls: TripSheetFormValues["tolls"]) {
     });
 }
 
-function toBasePayload(values: TripSheetFormValues) {
-  const { tolls, driver_id, ...rest } = values;
-  const payload = omitEmptyStrings(rest) as Record<string, unknown>;
-  for (const key of NUMERIC_KEYS) {
-    if (payload[key] !== undefined) payload[key] = Number(payload[key]);
+function vehicleToWire(v: TripSheetVehicleFormValues) {
+  const { driver_id, ...rest } = v;
+  const wire = omitEmptyStrings(rest) as Record<string, unknown>;
+  for (const key of VEHICLE_NUMERIC_KEYS) {
+    if (wire[key] !== undefined) wire[key] = Number(wire[key]);
   }
   // Always present (not omitted-when-empty like the other optional
   // fields above): the driver_id key must explicitly carry `null` to
-  // UNASSIGN a driver on PATCH — updateTripSheet only clears it when
-  // the key is present at all (`hasOwnProperty`), so omitting it here
-  // whenever the field is blank would make "remove the driver" silently
-  // impossible from the edit form.
-  payload.driver_id = driver_id || null;
+  // UNASSIGN a driver — the backend only clears it when the key is
+  // present at all.
+  wire.driver_id = driver_id || null;
+  return wire;
+}
+
+function toBasePayload(values: TripSheetFormValues) {
+  const { tolls, vehicles, ...rest } = values;
+  const payload = omitEmptyStrings(rest) as Record<string, unknown>;
+  payload.vehicles = vehicles.map(vehicleToWire);
   const wireTolls = tollsToWire(tolls);
   if (wireTolls.length > 0) payload.tolls = wireTolls;
   return payload;
@@ -110,37 +118,25 @@ function toCreatePayload(values: TripSheetFormValues) {
   return payload;
 }
 
-const MANUAL_MODE_CREATE_ONLY_KEYS = [
-  "manual_vehicle_number",
-  "manual_vehicle_type",
-  "manual_customer_name",
-  "base_price_rupees",
-  "base_hours",
-  "base_km",
-  "extra_km_rate_rupees",
-  "extra_hr_rate_rupees",
-  "slab_rate_rupees",
-  "min_km_per_day",
-  "driver_batta_per_day_rupees",
-  "per_km_rate_rupees",
-  "performance_batta_rupees",
-] as const;
-
 function toUpdatePayload(values: TripSheetFormValues) {
   const payload = toBasePayload(values);
-  // Create-only / immutable fields — see this file's top comment.
-  // updateTripSheetSchema doesn't declare vehicle/rate fields at all
-  // (same immutability as fleet mode's vehicle_id/pricing_rule_id —
-  // see tripSheet.repository.js#DRAFT_UPDATABLE_COLUMNS) and has
-  // .unknown(false), so sending any of these on PATCH 400s the whole
-  // request rather than being silently ignored.
+  // Create-only / immutable sheet-level fields — updateTripSheetSchema
+  // doesn't declare these at all (customer is fixed at create time,
+  // same as before Task B1) and has .unknown(false), so sending them on
+  // PATCH 400s the whole request rather than being silently ignored.
+  // `vehicles` itself IS allowed on PATCH now (Task B1's whole-array
+  // replace), unlike before when every vehicle/rate field was
+  // create-only immutable.
   delete payload.service_type;
   delete payload.billing_mode;
   delete payload.customer_id;
-  for (const key of MANUAL_MODE_CREATE_ONLY_KEYS) delete payload[key];
+  delete payload.manual_customer_name;
   // updateTripSheetSchema's tolls field has no default([]) — an
   // explicitly empty array still counts as "present" and triggers the
   // replace, which is what we want when the user removed every toll.
+  // Always safe to include here since `vehicles` is always present too
+  // (the form always submits the full array) — the backend's own
+  // TOLLS_REQUIRE_VEHICLES_PATCH guard is satisfied by construction.
   if (!("tolls" in payload)) payload.tolls = [];
   return payload;
 }
@@ -213,18 +209,27 @@ function csvEscape(value: unknown): string {
   return str;
 }
 
+// Task B1: one CSV row per SHEET (not per vehicle) — a summarized cell
+// for the Vehicle column ("KA01A1234 +2 more"), matching the list
+// screen's own summary choice, rather than fanning one sheet into N
+// rows. Total KM is the sum across every vehicle on the sheet
+// (tripSheet.repository.js#list's own sum_total_km); Total Hours/Total
+// Days have no sheet-level aggregate equivalent (they were per-vehicle
+// only, and summing hours/days across differently-timed vehicles isn't
+// a meaningful single number), so those two columns are dropped rather
+// than fabricated. Gross (Rs) is dropped too — gross_paise had no
+// sheet-level equivalent after the restructure (see
+// tripSheet.repository.js#list's own aggregates comment).
 const CSV_COLUMNS: { header: string; get: (row: TripSheetListRow) => unknown }[] = [
   { header: "Trip Number", get: (r) => r.trip_sheet_number },
   { header: "Date", get: (r) => r.trip_date },
   { header: "Service Type", get: (r) => r.service_type },
   { header: "Billing Mode", get: (r) => r.billing_mode },
   { header: "Customer", get: (r) => r.snapshot_customer_name },
-  { header: "Vehicle", get: (r) => r.snapshot_vehicle_number },
-  { header: "Total KM", get: (r) => r.total_km },
-  { header: "Total Hours", get: (r) => r.total_hours },
-  { header: "Total Days", get: (r) => r.total_days },
-  { header: "Gross (Rs)", get: (r) => (r.gross_paise / 100).toFixed(2) },
-  { header: "Net Payable (Rs)", get: (r) => (r.net_payable_paise / 100).toFixed(2) },
+  { header: "Vehicle", get: (r) => (r.vehicle_count > 1 ? `${r.first_vehicle_number ?? ""} +${r.vehicle_count - 1} more` : (r.first_vehicle_number ?? "")) },
+  { header: "Vehicle Count", get: (r) => r.vehicle_count },
+  { header: "Total KM", get: (r) => r.sum_total_km },
+  { header: "Net Payable (Rs)", get: (r) => (r.total_net_payable_paise / 100).toFixed(2) },
   { header: "Status", get: (r) => r.status },
 ];
 

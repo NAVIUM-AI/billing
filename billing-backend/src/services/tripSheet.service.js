@@ -25,6 +25,7 @@ const { rupeesToPaise, formatINR } = require("../utils/money");
 const { toIndianFY } = require("../utils/fiscalYear");
 const tsn = require("../utils/tripSheetNumber");
 const tripRepo = require("../repositories/tripSheet.repository");
+const vehicleLineRepo = require("../repositories/tripSheetVehicle.repository");
 const tollRepo = require("../repositories/tripToll.repository");
 const seqRepo = require("../repositories/tripSheetSequence.repository");
 const custRepo = require("../repositories/customer.repository");
@@ -32,6 +33,7 @@ const vehRepo = require("../repositories/vehicle.repository");
 const drvRepo = require("../repositories/driver.repository");
 const ruleRepo = require("../repositories/pricingRule.repository");
 const tenantRepo = require("../repositories/tenant.repository");
+const { MANUAL_RATE_FIELDS_BY_FORMULA, findVehicleItemError } = require("../validators/tripSheet.validator");
 const { apiError } = require("../utils/httpError");
 
 /**
@@ -188,6 +190,148 @@ function parseCalendarDateLocal(isoDateStr) {
 }
 
 /**
+ * Resolves one vehicle-array item into the full insert-ready shape
+ * tripSheetVehicle.repository.js#insertBatch expects (camelCase,
+ * `snap` object, computed totals) — the per-vehicle equivalent of what
+ * createTripSheet used to do inline for its single vehicle. Runs the
+ * SAME fleet/manual lookup + pure-calculator sequence Task A already
+ * established; only the caller now loops this once per vehicle instead
+ * of running it once for the whole trip.
+ *
+ * @param {string} tenantId
+ * @param {object} v - one validated vehicleItemSchema item
+ * @param {number} lineNumber - 1-based position in the sheet
+ * @param {string} serviceType
+ * @param {string} billingMode
+ * @param {string} ruleType
+ * @param {string} tripDateIso
+ * @param {number} effectiveTollPaise - resolved by the caller (itemized-tolls-sum override for a lone vehicle, or this vehicle's own toll_rupees)
+ * @param {import('pg').PoolClient} client
+ * @returns {Promise<object>}
+ */
+async function resolveAndComputeVehicle(
+  tenantId,
+  v,
+  lineNumber,
+  serviceType,
+  billingMode,
+  ruleType,
+  tripDateIso,
+  effectiveTollPaise,
+  client,
+) {
+  const isManual = v.manual_vehicle_number !== undefined;
+
+  let vehicleId;
+  let driverId = null;
+  let pricingRuleId;
+  let snapshotVehicleNumber;
+  let snapshotVehicleType;
+  let ruleForCalc;
+  let snap;
+
+  if (v.driver_id) {
+    const driver = await drvRepo.findById(tenantId, v.driver_id, client);
+    if (!driver) {
+      throw apiError(404, "DRIVER_NOT_FOUND", "Driver not found.", { vehicle_index: lineNumber });
+    }
+    driverId = driver.id;
+  }
+
+  if (isManual) {
+    vehicleId = null;
+    pricingRuleId = null;
+    snapshotVehicleNumber = v.manual_vehicle_number;
+    snapshotVehicleType = v.manual_vehicle_type;
+    ruleForCalc = { rule_type: ruleType, ...buildManualRuleForCalc(v) };
+    snap = buildManualSnap(v);
+  } else {
+    const vehicle = await vehRepo.findById(tenantId, v.vehicle_id, client);
+    if (!vehicle || !vehicle.is_active) {
+      throw apiError(404, "VEHICLE_NOT_FOUND", "Vehicle not found.", { vehicle_index: lineNumber });
+    }
+
+    const rule = await ruleRepo.findApplicable(
+      tenantId,
+      { ruleType, vehicleType: vehicle.vehicle_type, onDate: tripDateIso },
+      client,
+    );
+    if (!rule) {
+      throw apiError(
+        400,
+        "NO_APPLICABLE_PRICING_RULE",
+        "No pricing rule found for this vehicle_type + rule_type on the trip date. Configure a rule in Settings → Pricing.",
+        { vehicle_type: vehicle.vehicle_type, rule_type: ruleType, on_date: tripDateIso, vehicle_index: lineNumber },
+      );
+    }
+
+    vehicleId = vehicle.id;
+    pricingRuleId = rule.id;
+    snapshotVehicleNumber = vehicle.vehicle_number;
+    snapshotVehicleType = vehicle.vehicle_type;
+    ruleForCalc = { rule_type: rule.rule_type, ...rule };
+    snap = {
+      baseHours: rule.base_hours,
+      baseKm: rule.base_km,
+      basePricePaise: rule.base_price_paise,
+      extraKmRatePaise: rule.extra_km_rate_paise,
+      extraHrRatePaise: rule.extra_hr_rate_paise,
+      slabRatePaise: rule.slab_rate_paise,
+      minKmPerDay: rule.min_km_per_day,
+      driverBattaPerDayPaise: rule.driver_batta_per_day_paise,
+      perKmRatePaise: rule.per_km_rate_paise,
+      performanceBattaPaise: rule.performance_batta_paise,
+    };
+  }
+
+  const parkingPaise = rupeesToPaise(v.parking_rupees);
+  const permitPaise = rupeesToPaise(v.permit_rupees);
+  const fasttagPaise = rupeesToPaise(v.fasttag_rupees);
+  const advancePaise = rupeesToPaise(v.advance_rupees);
+
+  const { calcResult, totals } = computeTripTotals(ruleForCalc, ruleType, serviceType, billingMode, {
+    totalKm: v.total_km,
+    totalHours: v.total_hours,
+    totalDays: v.total_days,
+    tollPaise: effectiveTollPaise,
+    parkingPaise,
+    permitPaise,
+    fasttagPaise,
+    advancePaise,
+  });
+
+  return {
+    lineNumber,
+    vehicleId,
+    driverId,
+    pricingRuleId,
+    pricingSource: isManual ? "MANUAL" : "FLEET",
+    snapshotVehicleNumber,
+    snapshotVehicleType,
+    snap,
+    startDatetime: v.start_datetime,
+    endDatetime: v.end_datetime,
+    openingKm: v.opening_km,
+    closingKm: v.closing_km,
+    totalKm: v.total_km,
+    totalHours: v.total_hours,
+    totalDays: v.total_days,
+    tollPaise: effectiveTollPaise,
+    parkingPaise,
+    permitPaise,
+    fasttagPaise,
+    advancePaise,
+    baseAmountPaise: totals.baseAmountPaise,
+    extrasAmountPaise: totals.extrasAmountPaise,
+    driverBattaPaise: totals.driverBattaPaise,
+    subtotalPaise: totals.subtotalPaise,
+    grossPaise: totals.grossPaise,
+    netPayablePaise: totals.netPayablePaise,
+    breakdown: calcResult.breakdown,
+  };
+}
+
+/**
  * @param {string} tenantId
  * @param {object} input - validated createTripSheetSchema output
  * @param {string} actorUserId
@@ -198,52 +342,41 @@ async function createTripSheet(tenantId, input, actorUserId, db) {
   // Step 1: Normalize.
   const serviceType = input.service_type.toUpperCase();
   const billingMode = input.billing_mode.toUpperCase();
-  const explicitTollPaise = rupeesToPaise(input.toll_rupees);
-  const parkingPaise = rupeesToPaise(input.parking_rupees);
-  const permitPaise = rupeesToPaise(input.permit_rupees);
-  const fasttagPaise = rupeesToPaise(input.fasttag_rupees);
-  const advancePaise = rupeesToPaise(input.advance_rupees);
   const tripDateObj = parseCalendarDateLocal(input.trip_date);
   const normalizedTolls = normalizeTolls(input.tolls);
+  const normalizedTollsSum = normalizedTolls.reduce((sum, t) => sum + t.amountPaise, 0);
 
   // Step 2: Derive.
   const fiscalYear = toIndianFY(tripDateObj);
+  const ruleType = deriveRuleType(serviceType, billingMode);
 
-  // Step 3: Validate.
-  if (
-    input.opening_km !== undefined &&
-    input.closing_km !== undefined &&
-    input.closing_km < input.opening_km
-  ) {
-    throw apiError(400, "INVALID_KM_RANGE", "closing_km must be >= opening_km");
+  // Step 3: Validate. Per-vehicle km-range/datetime-range checks (Task
+  // B1 moved these fields off trip_sheets onto trip_sheet_vehicles,
+  // where the same CHECK constraints now live — this loop is the
+  // service-level mirror of them, same "specific apiError code beats
+  // Joi's generic wrapping" reasoning the original single-vehicle
+  // version of this check documented).
+  input.vehicles.forEach((v, idx) => {
+    if (v.opening_km !== undefined && v.closing_km !== undefined && v.closing_km < v.opening_km) {
+      throw apiError(400, "INVALID_KM_RANGE", "closing_km must be >= opening_km", { vehicle_index: idx + 1 });
+    }
+  });
+
+  // Sum-vs-array cross-field rule (Task 3.2), scoped to a lone vehicle
+  // (the validator's own tolls.multiVehicleUnsupported check already
+  // guarantees normalizedTolls is empty whenever vehicles.length > 1) —
+  // see tripSheet.validator.js's createTripSheetSchema tolls comment.
+  if (input.vehicles.length === 1) {
+    const explicitTollPaise = rupeesToPaise(input.vehicles[0].toll_rupees);
+    if (serviceType === "OUTSTATION" && normalizedTolls.length > 0 && explicitTollPaise > 0) {
+      throw apiError(
+        400,
+        "TOLL_INPUT_CONFLICT",
+        "Provide either a lump-sum toll_rupees OR an itemized tolls array — not both.",
+        { toll_rupees: input.vehicles[0].toll_rupees, tolls_count: normalizedTolls.length },
+      );
+    }
   }
-
-  // Sum-vs-array cross-field rule (Task 3.2): the wire contract must
-  // not accept both a lump-sum toll_rupees AND an itemized tolls array
-  // on the same request — see tripSheet.validator.js's top-of-file
-  // comment on tollReceiptSchema for why this lives here, not in Joi.
-  if (serviceType === "OUTSTATION" && normalizedTolls.length > 0 && explicitTollPaise > 0) {
-    throw apiError(
-      400,
-      "TOLL_INPUT_CONFLICT",
-      "Provide either a lump-sum toll_rupees OR an itemized tolls array — not both.",
-      { toll_rupees: input.toll_rupees, tolls_count: normalizedTolls.length },
-    );
-  }
-
-  // Effective toll: sum of itemized receipts when present, otherwise
-  // the lump-sum value. The conflict check above guarantees these two
-  // sources are never both nonzero, so there's no ambiguity in which
-  // one "wins".
-  const tollPaise =
-    normalizedTolls.length > 0
-      ? normalizedTolls.reduce((sum, t) => sum + t.amountPaise, 0)
-      : explicitTollPaise;
-
-  // Manual mode detection: the validator's own cross-field .custom()
-  // check already guarantees exactly one of vehicle_id / manual_vehicle_*
-  // is present on a valid request — this just reads which one.
-  const isManual = input.manual_vehicle_number !== undefined;
 
   // Steps 4 + 5: Check (DB state) + Write, as one transaction.
   return db.withTenantContext(async (client) => {
@@ -258,12 +391,6 @@ async function createTripSheet(tenantId, input, actorUserId, db) {
     let customerId = null;
     let snapshotCustomerName = null;
     let snapshotCustomerGstin = null;
-    // Distinct from snapshotCustomerName (which the free-text case
-    // ALSO populates, same "manual input mirrors into the snapshot
-    // column" pattern manual_vehicle_number/type already established)
-    // — this one is persisted into its own manual_customer_name column
-    // so a free-text trip stays distinguishable from a real customer
-    // whose captured name happens to match, purely for audit purposes.
     let manualCustomerName = null;
     if (input.customer_id) {
       const customer = await custRepo.findById(tenantId, input.customer_id, client);
@@ -278,111 +405,41 @@ async function createTripSheet(tenantId, input, actorUserId, db) {
       manualCustomerName = input.manual_customer_name;
     }
 
-    // (c) Driver, if provided. Inactive drivers are allowed — a trip
-    // may be backfilled against a driver who has since been archived.
-    // Unchanged by manual mode — driver stays optional either way (the
-    // frontend just hides the field in manual mode; the backend keeps
-    // full support for it, per this task's own instruction).
-    let driverId = null;
-    if (input.driver_id) {
-      const driver = await drvRepo.findById(tenantId, input.driver_id, client);
-      if (!driver) {
-        throw apiError(404, "DRIVER_NOT_FOUND", "Driver not found.");
-      }
-      driverId = driver.id;
-    }
-
-    const ruleType = deriveRuleType(serviceType, billingMode);
-
-    let vehicleId;
-    let pricingRuleId;
-    let snapshotVehicleNumber;
-    let snapshotVehicleType;
-    let ruleForCalc;
-    let snap;
-
-    if (isManual) {
-      // (b)+(d) skipped entirely — no fleet vehicle lookup, no pricing
-      // rule lookup. The manual rate fields ARE the rule, built
-      // straight from validated request input instead of a DB row.
-      vehicleId = null;
-      pricingRuleId = null;
-      snapshotVehicleNumber = input.manual_vehicle_number;
-      snapshotVehicleType = input.manual_vehicle_type;
-      ruleForCalc = { rule_type: ruleType, ...buildManualRuleForCalc(input) };
-      snap = buildManualSnap(input);
-    } else {
-      // (b) Vehicle.
-      const vehicle = await vehRepo.findById(tenantId, input.vehicle_id, client);
-      if (!vehicle || !vehicle.is_active) {
-        throw apiError(404, "VEHICLE_NOT_FOUND", "Vehicle not found.");
-      }
-
-      // (d) Resolve the applicable pricing rule.
-      const rule = await ruleRepo.findApplicable(
+    // (b) Resolve + compute every vehicle in order. Each is fully
+    // independent (own fleet/manual lookup, own calculator run) — a
+    // failure on vehicle #3 rolls back the whole transaction, so
+    // vehicles #1-2's resolution work is never partially committed.
+    const resolvedVehicles = [];
+    for (let idx = 0; idx < input.vehicles.length; idx++) {
+      const v = input.vehicles[idx];
+      const effectiveTollPaise =
+        idx === 0 && input.vehicles.length === 1 && normalizedTolls.length > 0
+          ? normalizedTollsSum
+          : rupeesToPaise(v.toll_rupees);
+      const resolved = await resolveAndComputeVehicle(
         tenantId,
-        { ruleType, vehicleType: vehicle.vehicle_type, onDate: input.trip_date },
+        v,
+        idx + 1,
+        serviceType,
+        billingMode,
+        ruleType,
+        input.trip_date,
+        effectiveTollPaise,
         client,
       );
-      if (!rule) {
-        throw apiError(
-          400,
-          "NO_APPLICABLE_PRICING_RULE",
-          "No pricing rule found for this vehicle_type + rule_type on the trip date. Configure a rule in Settings → Pricing.",
-          { vehicle_type: vehicle.vehicle_type, rule_type: ruleType, on_date: input.trip_date },
-        );
-      }
-
-      vehicleId = vehicle.id;
-      pricingRuleId = rule.id;
-      snapshotVehicleNumber = vehicle.vehicle_number;
-      snapshotVehicleType = vehicle.vehicle_type;
-      ruleForCalc = { rule_type: rule.rule_type, ...rule };
-      // Snapshot rule fields. The rule row already carries NULL for
-      // every field not relevant to its own rule_type (enforced by the
-      // pricing_rules per-type CHECK constraints), so copying the
-      // whole set of rate columns straight across is correct for
-      // every rule_type without branching here.
-      snap = {
-        baseHours: rule.base_hours,
-        baseKm: rule.base_km,
-        basePricePaise: rule.base_price_paise,
-        extraKmRatePaise: rule.extra_km_rate_paise,
-        extraHrRatePaise: rule.extra_hr_rate_paise,
-        slabRatePaise: rule.slab_rate_paise,
-        minKmPerDay: rule.min_km_per_day,
-        driverBattaPerDayPaise: rule.driver_batta_per_day_paise,
-        perKmRatePaise: rule.per_km_rate_paise,
-        performanceBattaPaise: rule.performance_batta_paise,
-      };
+      resolvedVehicles.push(resolved);
     }
 
-    // (e) Compute pricing via the pure calculator, and (f) derive
-    // computed totals from the result — shared with updateTripSheet's
-    // recompute so the two can never drift apart. Identical for both
-    // modes: ruleForCalc is either a real pricing_rules row (fleet) or
-    // the manual rate fields reshaped into the same rule-shaped object
-    // (manual) — the calculator itself has no idea which one it got.
-    const { calcResult, totals } = computeTripTotals(ruleForCalc, ruleType, serviceType, billingMode, {
-      totalKm: input.total_km,
-      totalHours: input.total_hours,
-      totalDays: input.total_days,
-      tollPaise,
-      parkingPaise,
-      permitPaise,
-      fasttagPaise,
-      advancePaise,
-    });
-    const { baseAmountPaise, extrasAmountPaise, driverBattaPaise, subtotalPaise, grossPaise, netPayablePaise } =
-      totals;
+    const totalNetPayablePaise = resolvedVehicles.reduce((sum, rv) => sum + rv.netPayablePaise, 0);
 
     // (g) Allocate the trip sheet number.
     const tenant = await tenantRepo.findById(tenantId, client);
     const seq = await seqRepo.allocateSeq(tenantId, fiscalYear, client);
     const tripSheetNumber = tsn.format(tenant.trip_sheet_prefix, seq, tripDateObj);
 
-    // (i) Insert the trip, then its itemized tolls (if any) in the same
-    // transaction — either both land or neither does.
+    // (i) Insert the sheet, then its vehicles, then its itemized tolls
+    // (if any) — all in the same transaction, so either everything
+    // lands or none of it does.
     const trip = await tripRepo.insert(
       tenantId,
       {
@@ -391,46 +448,23 @@ async function createTripSheet(tenantId, input, actorUserId, db) {
         billingMode,
         customerId,
         manualCustomerName,
-        vehicleId,
-        driverId,
-        pricingRuleId,
-        pricingSource: isManual ? "MANUAL" : "FLEET",
-        snapshotVehicleNumber,
-        snapshotVehicleType,
         snapshotCustomerName,
         snapshotCustomerGstin,
-        snap,
         tripDate: input.trip_date,
-        startDatetime: input.start_datetime,
-        endDatetime: input.end_datetime,
-        openingKm: input.opening_km,
-        closingKm: input.closing_km,
-        totalKm: input.total_km,
-        totalHours: input.total_hours,
-        totalDays: input.total_days,
-        tollPaise,
-        parkingPaise,
-        permitPaise,
-        fasttagPaise,
-        advancePaise,
-        baseAmountPaise,
-        extrasAmountPaise,
-        driverBattaPaise,
-        subtotalPaise,
-        grossPaise,
-        netPayablePaise,
-        breakdown: calcResult.breakdown,
         bookedBy: input.booked_by,
         paxNote: input.pax_note,
         remarks: input.remarks,
         createdBy: actorUserId,
+        vehicleCount: resolvedVehicles.length,
+        totalNetPayablePaise,
       },
       client,
     );
 
+    const vehicles = await vehicleLineRepo.insertBatch(tenantId, trip.id, resolvedVehicles, client);
     const tolls = await tollRepo.insertBatch(tenantId, trip.id, normalizedTolls, client);
 
-    return { ...trip, tolls };
+    return { ...trip, vehicles, tolls };
   });
 }
 
@@ -446,55 +480,14 @@ async function getTripSheet(tenantId, id, db) {
     if (!found) {
       return null;
     }
+    const vehicles = await vehicleLineRepo.listBySheet(tenantId, id, client);
     const tolls = await tollRepo.listByTrip(tenantId, id, client);
-    return { ...found, tolls };
+    return { ...found, vehicles, tolls };
   });
   if (!trip) {
     throw apiError(404, "TRIP_NOT_FOUND", "Trip sheet not found.");
   }
   return trip;
-}
-
-/**
- * Recomputes pricing for the effective (patch merged onto existing
- * trip) usage values, using the SAME rule the trip was originally
- * priced against — via `trip.pricing_rule_id` if that rule still
- * exists, falling back to the trip's own immutable snapshot fields
- * otherwise. This deliberately never calls ruleRepo.findApplicable():
- * doing so could silently pick up a newer rule that has since
- * superseded the original (a rule's rate columns are themselves
- * immutable — supersede only ever touches the OLD row's effective_to,
- * never its rates — so findById on the original id is guaranteed to
- * return the same numbers as the snapshot; this is belt-and-suspenders
- * consistency between the two, not a case where they could diverge).
- *
- * @param {string} tenantId
- * @param {object} trip - current trip_sheets row
- * @param {import('pg').PoolClient} client
- * @returns {Promise<object>} a rule-shaped object usable by calculate()
- */
-async function resolveRuleForRecompute(tenantId, trip, client) {
-  if (trip.pricing_rule_id) {
-    const ruleRow = await ruleRepo.findById(tenantId, trip.pricing_rule_id, client);
-    if (ruleRow) {
-      return { rule_type: ruleRow.rule_type, ...ruleRow };
-    }
-  }
-  // Rule was hard-deleted or never linked — the snapshot IS the truth
-  // (ADR-005).
-  return {
-    rule_type: deriveRuleType(trip.service_type, trip.billing_mode),
-    base_hours: trip.snap_base_hours,
-    base_km: trip.snap_base_km,
-    base_price_paise: trip.snap_base_price_paise,
-    extra_km_rate_paise: trip.snap_extra_km_rate_paise,
-    extra_hr_rate_paise: trip.snap_extra_hr_rate_paise,
-    slab_rate_paise: trip.snap_slab_rate_paise,
-    min_km_per_day: trip.snap_min_km_per_day,
-    driver_batta_per_day_paise: trip.snap_driver_batta_per_day_paise,
-    per_km_rate_paise: trip.snap_per_km_rate_paise,
-    performance_batta_paise: trip.snap_performance_batta_paise,
-  };
 }
 
 /**
@@ -579,13 +572,19 @@ function computeTripTotals(ruleForCalc, ruleType, serviceType, billingMode, effe
 }
 
 /**
- * PATCH /trips/:tripId — editable only while a trip is DRAFT. Every
- * charge/usage field is optional; whatever's present in `patch`
- * overrides the trip's current value, and derived totals
- * (base/extras/batta/subtotal/gross/net/breakdown) are ALWAYS
- * recomputed as a group via the pricing engine — never patched
- * independently — so they can never drift out of sync with the
- * usage fields that produced them.
+ * PATCH /trips/:tripId — editable only while a trip is DRAFT. Sheet-
+ * level fields (trip_date, booked_by, pax_note, remarks) patch
+ * individually as before. `vehicles`, if present, REPLACES the whole
+ * array — Task B1 made each vehicle "fully self-contained", so editing
+ * one means resending the full desired set; the service deletes the
+ * old rows and re-resolves + recomputes every vehicle fresh (same
+ * fleet/manual lookup + pure-calculator sequence createTripSheet uses),
+ * not a partial merge against the old rows. `tolls` may only be patched
+ * TOGETHER with `vehicles` in the same request (see the explicit check
+ * below) — the itemized toll log's sum only has a defined home (a
+ * SPECIFIC vehicle's toll_paise) once that vehicle set is being
+ * recomputed anyway, and there's no well-defined "which existing
+ * vehicle does this apply to" otherwise.
  *
  * @param {string} tenantId
  * @param {string} id
@@ -598,36 +597,31 @@ async function updateTripSheet(tenantId, id, patch, actorUserId, db) {
   // Step 1: Normalize.
   const tollsInPatch = Object.prototype.hasOwnProperty.call(patch, "tolls");
   const normalizedTolls = tollsInPatch ? normalizeTolls(patch.tolls) : null;
-
-  const explicitTollPaiseInPatch = patch.toll_rupees !== undefined ? rupeesToPaise(patch.toll_rupees) : undefined;
-  const parkingPaiseInPatch = patch.parking_rupees !== undefined ? rupeesToPaise(patch.parking_rupees) : undefined;
-  const permitPaiseInPatch = patch.permit_rupees !== undefined ? rupeesToPaise(patch.permit_rupees) : undefined;
-  const fasttagPaiseInPatch = patch.fasttag_rupees !== undefined ? rupeesToPaise(patch.fasttag_rupees) : undefined;
-  const advancePaiseInPatch = patch.advance_rupees !== undefined ? rupeesToPaise(patch.advance_rupees) : undefined;
+  const vehiclesInPatch = Object.prototype.hasOwnProperty.call(patch, "vehicles");
 
   // Step 2: Derive. Nothing new — FY/numbering are set once at create
   // and never revisited.
 
-  // Step 3: Validate.
-  if (
-    patch.opening_km !== undefined &&
-    patch.closing_km !== undefined &&
-    patch.closing_km < patch.opening_km
-  ) {
-    throw apiError(400, "INVALID_KM_RANGE", "closing_km must be >= opening_km");
+  // Step 3: Validate. Per-vehicle km-range check, mirroring
+  // createTripSheet's own loop — only meaningful when vehicles are
+  // actually part of this patch.
+  if (vehiclesInPatch) {
+    patch.vehicles.forEach((v, idx) => {
+      if (v.opening_km !== undefined && v.closing_km !== undefined && v.closing_km < v.opening_km) {
+        throw apiError(400, "INVALID_KM_RANGE", "closing_km must be >= opening_km", { vehicle_index: idx + 1 });
+      }
+    });
   }
 
-  // Same sum-vs-array mutex as createTripSheet, adapted for PATCH: only
-  // a genuinely non-empty itemized array conflicts with a genuinely
-  // nonzero lump sum. An explicitly-empty `tolls: []` alongside a new
-  // `toll_rupees` is NOT a conflict — that's "switch from itemized to
-  // lump-sum in one request", a legitimate edit, not an ambiguous one.
-  if (tollsInPatch && normalizedTolls.length > 0 && (explicitTollPaiseInPatch ?? 0) > 0) {
+  // Editing the itemized toll log requires knowing which vehicle its
+  // sum applies to, which is only well-defined when that vehicle set is
+  // being recomputed in the SAME request — see this function's own doc
+  // comment.
+  if (tollsInPatch && !vehiclesInPatch) {
     throw apiError(
       400,
-      "TOLL_INPUT_CONFLICT",
-      "Provide either a lump-sum toll_rupees OR an itemized tolls array — not both.",
-      { toll_rupees: patch.toll_rupees, tolls_count: normalizedTolls.length },
+      "TOLLS_REQUIRE_VEHICLES_PATCH",
+      "Editing tolls requires resending the full vehicles array in the same request.",
     );
   }
 
@@ -651,87 +645,89 @@ async function updateTripSheet(tenantId, id, patch, actorUserId, db) {
       );
     }
 
-    // (c) driver_id, if touched. null unlinks the driver; a nonzero id
-    // must resolve to a real driver (inactive is fine — same
-    // reasoning as createTripSheet).
-    if (Object.prototype.hasOwnProperty.call(patch, "driver_id") && patch.driver_id) {
-      const driver = await drvRepo.findById(tenantId, patch.driver_id, client);
-      if (!driver) {
-        throw apiError(404, "DRIVER_NOT_FOUND", "Driver not found.");
+    // Same sum-vs-array mutex as createTripSheet, scoped to a lone
+    // vehicle — the effective vehicle count after this patch is
+    // patch.vehicles.length whenever vehicles is being replaced
+    // (tollsInPatch guarantees vehiclesInPatch is also true, per the
+    // pre-transaction check above).
+    if (tollsInPatch && normalizedTolls.length > 0 && patch.vehicles.length > 1) {
+      throw apiError(
+        400,
+        "TOLLS_MULTI_VEHICLE_UNSUPPORTED",
+        "Itemized toll receipts (tolls[]) are only supported for single-vehicle trips — use each vehicle's own toll_rupees instead.",
+      );
+    }
+
+    // (c) Vehicles: fleet-vs-manual + per-formula rate-fields-required
+    // check, using the trip's own immutable service_type/billing_mode
+    // (only known now that the row is read — see
+    // tripSheet.validator.js#updateTripSheetSchema's own comment on why
+    // this half of the check couldn't run in Joi).
+    const ruleType = deriveRuleType(trip.service_type, trip.billing_mode);
+    if (vehiclesInPatch) {
+      const vehicleError = findVehicleItemError(patch.vehicles, ruleType);
+      if (vehicleError) {
+        const messages = {
+          "manual.conflict": "provide either vehicle_id (fleet) OR manual_vehicle_number/manual_vehicle_type (manual) — not both.",
+          "manual.missing": "provide either vehicle_id (fleet) OR manual_vehicle_number + manual_vehicle_type (manual).",
+          "manual.incomplete": "manual mode requires both manual_vehicle_number and manual_vehicle_type.",
+          "manual.rateFieldsMissing": `manual mode for this service_type/billing_mode (${vehicleError.formula}) requires: ${vehicleError.missing}.`,
+        };
+        throw apiError(400, "INVALID_VEHICLE_ITEM", `Vehicle #${vehicleError.index + 1}: ${messages[vehicleError.code]}`, {
+          vehicle_index: vehicleError.index + 1,
+        });
       }
     }
 
-    // (d) Recompute derived totals via the pricing engine, using the
-    // SAME rule the trip already carries (never an implicit lookup —
-    // see resolveRuleForRecompute's comment).
-    const ruleType = deriveRuleType(trip.service_type, trip.billing_mode);
-    const ruleForCalc = await resolveRuleForRecompute(tenantId, trip, client);
-
-    const effectiveTotalKm = patch.total_km ?? trip.total_km;
-    const effectiveTotalHours = patch.total_hours ?? trip.total_hours;
-    const effectiveTotalDays = patch.total_days ?? trip.total_days;
-
-    // Toll: itemized array wins if present in patch (summed, or 0 if
-    // cleared to [] with no accompanying lump value); else patch's
-    // lump toll_rupees; else the trip's existing toll_paise.
-    let effectiveTollPaise;
-    if (tollsInPatch) {
-      effectiveTollPaise =
-        normalizedTolls.length > 0
-          ? normalizedTolls.reduce((sum, t) => sum + t.amountPaise, 0)
-          : (explicitTollPaiseInPatch ?? 0);
-    } else if (explicitTollPaiseInPatch !== undefined) {
-      effectiveTollPaise = explicitTollPaiseInPatch;
-    } else {
-      effectiveTollPaise = trip.toll_paise;
+    // (d) Resolve + recompute every vehicle fresh (delete-then-reinsert
+    // — Part D.3's own "simpler and safe within the txn" choice), only
+    // when the patch actually touches the array.
+    let vehicleCountForPatch;
+    let totalNetPayablePaiseForPatch;
+    let newVehicleRows = null;
+    if (vehiclesInPatch) {
+      const normalizedTollsSum = tollsInPatch ? normalizedTolls.reduce((sum, t) => sum + t.amountPaise, 0) : 0;
+      const effectiveTripDate = patch.trip_date ?? trip.trip_date;
+      const resolvedVehicles = [];
+      for (let idx = 0; idx < patch.vehicles.length; idx++) {
+        const v = patch.vehicles[idx];
+        const effectiveTollPaise =
+          idx === 0 && patch.vehicles.length === 1 && tollsInPatch && normalizedTolls.length > 0
+            ? normalizedTollsSum
+            : rupeesToPaise(v.toll_rupees);
+        const resolved = await resolveAndComputeVehicle(
+          tenantId,
+          v,
+          idx + 1,
+          trip.service_type,
+          trip.billing_mode,
+          ruleType,
+          effectiveTripDate,
+          effectiveTollPaise,
+          client,
+        );
+        resolvedVehicles.push(resolved);
+      }
+      await vehicleLineRepo.deleteBySheet(tenantId, id, client);
+      newVehicleRows = await vehicleLineRepo.insertBatch(tenantId, id, resolvedVehicles, client);
+      vehicleCountForPatch = resolvedVehicles.length;
+      totalNetPayablePaiseForPatch = resolvedVehicles.reduce((sum, rv) => sum + rv.netPayablePaise, 0);
     }
 
-    const effectiveParkingPaise = parkingPaiseInPatch !== undefined ? parkingPaiseInPatch : trip.parking_paise;
-    const effectivePermitPaise = permitPaiseInPatch !== undefined ? permitPaiseInPatch : trip.permit_paise;
-    const effectiveFasttagPaise = fasttagPaiseInPatch !== undefined ? fasttagPaiseInPatch : trip.fasttag_paise;
-    const effectiveAdvancePaise = advancePaiseInPatch !== undefined ? advancePaiseInPatch : trip.advance_paise;
-
-    const { calcResult, totals } = computeTripTotals(ruleForCalc, ruleType, trip.service_type, trip.billing_mode, {
-      totalKm: effectiveTotalKm,
-      totalHours: effectiveTotalHours,
-      totalDays: effectiveTotalDays,
-      tollPaise: effectiveTollPaise,
-      parkingPaise: effectiveParkingPaise,
-      permitPaise: effectivePermitPaise,
-      fasttagPaise: effectiveFasttagPaise,
-      advancePaise: effectiveAdvancePaise,
-    });
-
-    // (f) Build the whitelisted repo patch. Derived totals are always
-    // included (Step 1's note: recomputed as a group on every PATCH).
-    const patchToDb = {
-      base_amount_paise: totals.baseAmountPaise,
-      extras_amount_paise: totals.extrasAmountPaise,
-      driver_batta_paise: totals.driverBattaPaise,
-      subtotal_paise: totals.subtotalPaise,
-      gross_paise: totals.grossPaise,
-      net_payable_paise: totals.netPayablePaise,
-      breakdown: calcResult.breakdown,
-      toll_paise: effectiveTollPaise,
-      parking_paise: effectiveParkingPaise,
-      permit_paise: effectivePermitPaise,
-      fasttag_paise: effectiveFasttagPaise,
-      advance_paise: effectiveAdvancePaise,
-    };
+    // (e) Build the whitelisted repo patch — only genuinely-touched
+    // sheet-level fields, plus vehicle_count/total_net_payable_paise as
+    // a pair whenever the vehicle set was replaced.
+    const patchToDb = {};
     if (patch.trip_date !== undefined) patchToDb.trip_date = patch.trip_date;
-    if (patch.start_datetime !== undefined) patchToDb.start_datetime = patch.start_datetime;
-    if (patch.end_datetime !== undefined) patchToDb.end_datetime = patch.end_datetime;
-    if (patch.opening_km !== undefined) patchToDb.opening_km = patch.opening_km;
-    if (patch.closing_km !== undefined) patchToDb.closing_km = patch.closing_km;
-    if (patch.total_km !== undefined) patchToDb.total_km = patch.total_km;
-    if (patch.total_hours !== undefined) patchToDb.total_hours = patch.total_hours;
-    if (patch.total_days !== undefined) patchToDb.total_days = patch.total_days;
     if (patch.booked_by !== undefined) patchToDb.booked_by = patch.booked_by;
     if (patch.pax_note !== undefined) patchToDb.pax_note = patch.pax_note;
     if (patch.remarks !== undefined) patchToDb.remarks = patch.remarks;
-    if (Object.prototype.hasOwnProperty.call(patch, "driver_id")) patchToDb.driver_id = patch.driver_id;
+    if (vehiclesInPatch) {
+      patchToDb.vehicle_count = vehicleCountForPatch;
+      patchToDb.total_net_payable_paise = totalNetPayablePaiseForPatch;
+    }
 
-    // (g) Write.
+    // (f) Write.
     const updated = await tripRepo.updateDraft(tenantId, id, patchToDb, client);
     if (!updated) {
       // Shouldn't happen — findByIdForUpdate already holds the row
@@ -745,7 +741,7 @@ async function updateTripSheet(tenantId, id, patch, actorUserId, db) {
       );
     }
 
-    // (h) Tolls: atomic delete-then-reinsert only if the patch
+    // (g) Tolls: atomic delete-then-reinsert only if the patch
     // explicitly touched the array; otherwise leave the existing
     // toll rows alone and just read them back.
     let tolls;
@@ -756,8 +752,12 @@ async function updateTripSheet(tenantId, id, patch, actorUserId, db) {
       tolls = await tollRepo.listByTrip(tenantId, id, client);
     }
 
+    // (h) Vehicles: re-read whenever this patch didn't touch them, so
+    // the response always reflects the sheet's current full vehicle set.
+    const vehicles = newVehicleRows ?? (await vehicleLineRepo.listBySheet(tenantId, id, client));
+
     // (i) Return.
-    return { ...updated, tolls };
+    return { ...updated, vehicles, tolls };
   });
 }
 
@@ -800,8 +800,9 @@ async function finalizeTripSheet(tenantId, id, actorUserId, db) {
       throw apiError(409, "TRIP_STATUS_CHANGED", "Trip status changed. Reload and retry.", { trip_id: id });
     }
 
+    const vehicles = await vehicleLineRepo.listBySheet(tenantId, id, client);
     const tolls = await tollRepo.listByTrip(tenantId, id, client);
-    return { ...updated, tolls };
+    return { ...updated, vehicles, tolls };
   });
 }
 
@@ -846,8 +847,9 @@ async function cancelTripSheet(tenantId, id, { reason }, actorUserId, db) {
       throw apiError(409, "TRIP_STATUS_CHANGED", "Trip status changed. Reload and retry.", { trip_id: id });
     }
 
+    const vehicles = await vehicleLineRepo.listBySheet(tenantId, id, client);
     const tolls = await tollRepo.listByTrip(tenantId, id, client);
-    return { ...updated, tolls };
+    return { ...updated, vehicles, tolls };
   });
 }
 
@@ -1005,10 +1007,8 @@ async function listTrips(tenantId, query, db) {
     },
     aggregates: {
       sum_net_payable_paise: result.aggregates.sum_net_payable_paise,
-      sum_gross_paise: result.aggregates.sum_gross_paise,
       count_by_status: result.aggregates.count_by_status,
       sum_net_payable_rupees: formatINR(result.aggregates.sum_net_payable_paise),
-      sum_gross_rupees: formatINR(result.aggregates.sum_gross_paise),
     },
   };
 }

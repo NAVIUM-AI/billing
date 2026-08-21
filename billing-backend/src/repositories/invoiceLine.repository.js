@@ -131,6 +131,15 @@ async function listByInvoice(tenantId, invoiceId, client) {
  * existed on trip_sheets; this just widens the JOIN that already
  * existed for trip_sheet_number.
  *
+ * Task B1: snap_base_km/snap_base_hours/snap_extra_km_rate_paise/
+ * snap_extra_hr_rate_paise/snap_slab_rate_paise/toll_paise/
+ * parking_paise moved off trip_sheets onto trip_sheet_vehicles — an
+ * invoice_line only ever comes from a single-vehicle trip
+ * (invoice.service.js#resolveTripsForInvoice's own MULTI_VEHICLE_TRIP_
+ * NOT_INVOICEABLE checkpoint guarantees this), so joining that trip's
+ * ONE child row (line_number = 1) is unambiguous. trip_sheet_number and
+ * booked_by stayed sheet-level, still read off trip_sheets directly.
+ *
  * @param {string} tenantId
  * @param {string} invoiceId
  * @param {import('pg').PoolClient} client
@@ -139,12 +148,13 @@ async function listByInvoice(tenantId, invoiceId, client) {
 async function listByInvoiceForPdf(tenantId, invoiceId, client) {
   const result = await client.query(
     `SELECT il.*, ts.trip_sheet_number, ts.booked_by,
-            ts.snap_base_km, ts.snap_base_hours,
-            ts.snap_extra_km_rate_paise, ts.snap_extra_hr_rate_paise,
-            ts.snap_slab_rate_paise,
-            ts.toll_paise, ts.parking_paise
+            tsv.snap_base_km, tsv.snap_base_hours,
+            tsv.snap_extra_km_rate_paise, tsv.snap_extra_hr_rate_paise,
+            tsv.snap_slab_rate_paise,
+            tsv.toll_paise, tsv.parking_paise
      FROM invoice_lines il
      JOIN trip_sheets ts ON ts.id = il.trip_sheet_id AND ts.tenant_id = il.tenant_id
+     JOIN trip_sheet_vehicles tsv ON tsv.trip_sheet_id = ts.id AND tsv.tenant_id = ts.tenant_id AND tsv.line_number = 1
      WHERE il.invoice_id = $1 AND il.tenant_id = $2
      ORDER BY il.line_number ASC`,
     [invoiceId, tenantId],

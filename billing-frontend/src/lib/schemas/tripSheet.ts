@@ -31,7 +31,9 @@ const today = () => new Date().toISOString().slice(0, 10);
 // (not "description"), optional toll_id/crossed_at/vehicle_number/
 // closing_balance/notes. No update lifecycle (see types/tripSheet.ts's
 // TripToll comment) — this schema only ever backs a form row that gets
-// fully resubmitted, never patched by id.
+// fully resubmitted, never patched by id. Stayed SHEET-level under
+// Task B1 (not per-vehicle) — see tripSheet.validator.js's own comment
+// on why trip_tolls didn't need restructuring.
 export const tripTollFormSchema = z.object({
   plaza_name: z.string().min(2, "Required").max(255),
   toll_id: z.string().max(50).optional().or(z.literal("")),
@@ -43,15 +45,51 @@ export const tripTollFormSchema = z.object({
 });
 export type TripTollFormValues = z.infer<typeof tripTollFormSchema>;
 
-// Mirrors tripSheet.validator.js#createTripSheetSchema exactly. ONE
-// unified schema, not 3 separate discriminated-union schemas — Rule 10:
-// the backend itself has exactly one createTripSheetSchema whose field
-// set is IDENTICAL across every (service_type, billing_mode)
-// combination (total_km/total_hours/total_days/toll fields/tolls[] are
-// all present regardless of type — the backend's pricing engine, not
-// Joi, is what makes only some of them relevant to a given type's
-// calculation). A discriminated union would be modeling a distinction
-// the wire contract doesn't actually have.
+// Mirrors tripSheet.validator.js#vehicleItemSchema exactly (Task B1) —
+// one vehicle's worth of the old scalar create-schema fields: identity
+// (manual mode only — this form has never offered a registered-fleet
+// picker, see TripSheetFormPage.tsx's own top comment), manual rate
+// fields for all 3 formulas, usage, and per-vehicle charges.
+export const tripSheetVehicleFormSchema = z.object({
+  manual_vehicle_number: z.string().trim().min(3, "Required (min 3 characters)").max(20),
+  manual_vehicle_type: z.enum(VEHICLE_TYPES, { message: "Vehicle type is required" }),
+  driver_id: z.string().optional().or(z.literal("")),
+
+  // Formula A (LOCAL_PACKAGE) fields.
+  base_price_rupees: numericStringField(0.01, "Base price"),
+  base_hours: numericStringField(0, "Base hours"),
+  base_km: numericStringField(0, "Base km"),
+  extra_km_rate_rupees: numericStringField(0, "Extra km rate"),
+  extra_hr_rate_rupees: numericStringField(0, "Extra hour rate"),
+  // Formula B (OUTSTATION_SLAB) fields.
+  slab_rate_rupees: numericStringField(0.01, "Slab rate"),
+  min_km_per_day: numericStringField(0, "Min km per day"),
+  driver_batta_per_day_rupees: numericStringField(0, "Driver batta"),
+  // Formula C (PERFORMANCE) fields.
+  per_km_rate_rupees: numericStringField(0.01, "Per km rate"),
+  performance_batta_rupees: numericStringField(0, "Performance batta"),
+
+  start_datetime: z.string().optional().or(z.literal("")),
+  end_datetime: z.string().optional().or(z.literal("")),
+  total_km: numericStringField(0, "Total KM", { required: true }),
+  total_hours: numericStringField(0, "Total hours", { required: true }),
+  total_days: numericStringField(1, "Total days", { required: true }),
+
+  toll_rupees: numericStringField(0, "Toll"),
+  parking_rupees: numericStringField(0, "Parking"),
+  permit_rupees: numericStringField(0, "Permit"),
+  fasttag_rupees: numericStringField(0, "Fasttag"),
+  advance_rupees: numericStringField(0, "Advance"),
+});
+export type TripSheetVehicleFormValues = z.infer<typeof tripSheetVehicleFormSchema>;
+
+// Mirrors tripSheet.validator.js#createTripSheetSchema exactly (Task
+// B1: vehicles is now a 1-10 array, replacing the old scalar
+// vehicle/rate/usage/charge fields — see vehicleItemSchema's own
+// comment there). ONE unified schema, not 3 separate discriminated-
+// union schemas — Rule 10: the backend itself has exactly one schema
+// whose field set is IDENTICAL across every (service_type,
+// billing_mode) combination.
 export const tripSheetFormSchema = z
   .object({
     service_type: z.enum(TRIP_SERVICE_TYPES),
@@ -65,55 +103,17 @@ export const tripSheetFormSchema = z
     customer_id: z.string().optional().or(z.literal("")),
     manual_customer_name: z.string().max(255).optional().or(z.literal("")),
 
-    // Manual mode only (trip-sheets-manual-mode) — this form no longer
-    // offers a registered-fleet vehicle picker at all (see
-    // TripSheetFormPage.tsx's own top comment). driver_id stays in the
-    // schema — optional, submits null — even though no input renders
-    // for it; the backend keeps full support for it.
-    manual_vehicle_number: z.string().trim().min(3, "Required (min 3 characters)").max(20),
-    manual_vehicle_type: z.enum(VEHICLE_TYPES, { message: "Vehicle type is required" }),
-    driver_id: z.string().optional().or(z.literal("")),
-
-    // Formula A (LOCAL_PACKAGE) fields.
-    base_price_rupees: numericStringField(0.01, "Base price"),
-    base_hours: numericStringField(0, "Base hours"),
-    base_km: numericStringField(0, "Base km"),
-    extra_km_rate_rupees: numericStringField(0, "Extra km rate"),
-    extra_hr_rate_rupees: numericStringField(0, "Extra hour rate"),
-    // Formula B (OUTSTATION_SLAB) fields.
-    slab_rate_rupees: numericStringField(0.01, "Slab rate"),
-    min_km_per_day: numericStringField(0, "Min km per day"),
-    driver_batta_per_day_rupees: numericStringField(0, "Driver batta"),
-    // Formula C (PERFORMANCE) fields — performance_batta_rupees is a
-    // FLAT one-time amount, not "per day" (see MANUAL_RATE_FIELDS_BY_
-    // FORMULA's own comment above).
-    per_km_rate_rupees: numericStringField(0.01, "Per km rate"),
-    performance_batta_rupees: numericStringField(0, "Performance batta"),
+    // Task B1: 1-10 fully self-contained vehicles.
+    vehicles: z.array(tripSheetVehicleFormSchema).min(1, "At least one vehicle is required").max(10, "Maximum 10 vehicles"),
 
     trip_date: z
       .string()
       .min(1, "Required")
       .refine((v) => v <= today(), "trip_date cannot be in the future"),
-    start_datetime: z.string().optional().or(z.literal("")),
-    end_datetime: z.string().optional().or(z.literal("")),
 
-    // opening_km/closing_km deliberately absent — this task removes
-    // those inputs from the form entirely. Confirmed via Rule 14 (read
-    // tripSheet.service.js#createTripSheet) that total_km is an
-    // independently-required field, never derived from these two, so
-    // dropping the inputs has no computation impact — the backend's
-    // own Joi schema still accepts them as optional if any other
-    // future caller sends them, this form just never will.
-    total_km: numericStringField(0, "Total KM", { required: true }),
-    total_hours: numericStringField(0, "Total hours", { required: true }),
-    total_days: numericStringField(1, "Total days", { required: true }),
-
-    toll_rupees: numericStringField(0, "Toll"),
-    parking_rupees: numericStringField(0, "Parking"),
-    permit_rupees: numericStringField(0, "Permit"),
-    fasttag_rupees: numericStringField(0, "Fasttag"),
-    advance_rupees: numericStringField(0, "Advance"),
-
+    // Itemized tolls stayed SHEET-level (not per-vehicle) — see
+    // tripSheetVehicleFormSchema's own comment — but only usable
+    // against a single vehicle (superRefine below).
     tolls: z.array(tripTollFormSchema),
 
     booked_by: z.string().max(255).optional().or(z.literal("")),
@@ -121,23 +121,43 @@ export const tripSheetFormSchema = z
     remarks: z.string().max(2000).optional().or(z.literal("")),
   })
   .superRefine((data, ctx) => {
-    // Required manual rate fields for the active formula — mirrors
-    // tripSheet.validator.js's cross-field check exactly (same field
-    // list, same service_type+billing_mode -> formula mapping).
+    // Required manual rate fields for the active formula, per vehicle —
+    // mirrors tripSheet.validator.js's cross-field check exactly (same
+    // field list, same service_type+billing_mode -> formula mapping),
+    // now looped since a formula requirement applies to every vehicle
+    // on the sheet.
     const formula = deriveRuleType(data.service_type, data.billing_mode);
-    for (const field of MANUAL_RATE_FIELDS_BY_FORMULA[formula]) {
-      if (!data[field]) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: "Required for this trip type" });
+    data.vehicles.forEach((v, idx) => {
+      for (const field of MANUAL_RATE_FIELDS_BY_FORMULA[formula]) {
+        if (!v[field]) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["vehicles", idx, field], message: "Required for this trip type" });
+        }
       }
+    });
+
+    // Mirrors tripSheet.validator.js#createTripSheetSchema's own
+    // tolls.multiVehicleUnsupported check.
+    if (data.tolls.length > 0 && data.vehicles.length > 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["tolls"],
+        message: "Itemized toll receipts are only supported for single-vehicle trips — use each vehicle's own toll instead",
+      });
     }
 
     // Mirrors tripSheet.service.js's TOLL_INPUT_CONFLICT check
-    // (OUTSTATION only — see that function's own comment on why LOCAL/
-    // PERFORMANCE aren't included).
-    if (data.service_type === "OUTSTATION" && data.tolls.length > 0 && Number(data.toll_rupees || 0) > 0) {
+    // (OUTSTATION + single-vehicle only — see that function's own
+    // comment on why LOCAL/PERFORMANCE and multi-vehicle aren't
+    // included).
+    if (
+      data.vehicles.length === 1 &&
+      data.service_type === "OUTSTATION" &&
+      data.tolls.length > 0 &&
+      Number(data.vehicles[0].toll_rupees || 0) > 0
+    ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        path: ["toll_rupees"],
+        path: ["vehicles", 0, "toll_rupees"],
         message: "Provide either a lump-sum toll OR itemized tolls, not both",
       });
     }
@@ -166,15 +186,15 @@ const breakdownItemSchema = z.object({
   detail: z.string().optional(),
 });
 
-export const tripSheetResponseSchema = z.object({
+// Mirrors trip_sheet_vehicles exactly (Task B1 migration) — the 35
+// columns that moved off trip_sheets, plus the child row's own
+// id/trip_sheet_id/line_number/created_at.
+export const tripSheetVehicleResponseSchema = z.object({
   id: z.string().uuid(),
   tenant_id: z.string().uuid(),
-  trip_sheet_number: z.string(),
-  service_type: z.enum(TRIP_SERVICE_TYPES),
-  billing_mode: z.enum(TRIP_BILLING_MODES),
-  status: z.enum(TRIP_STATUSES),
-  customer_id: z.string().uuid().nullable(),
-  manual_customer_name: z.string().nullable(),
+  trip_sheet_id: z.string().uuid(),
+  line_number: z.number(),
+
   vehicle_id: z.string().uuid().nullable(),
   driver_id: z.string().uuid().nullable(),
   pricing_rule_id: z.string().uuid().nullable(),
@@ -182,8 +202,6 @@ export const tripSheetResponseSchema = z.object({
 
   snapshot_vehicle_number: z.string(),
   snapshot_vehicle_type: z.enum(VEHICLE_TYPES),
-  snapshot_customer_name: z.string().nullable(),
-  snapshot_customer_gstin: z.string().nullable(),
 
   snap_base_hours: z.number().nullable(),
   snap_base_km: z.number().nullable(),
@@ -196,7 +214,6 @@ export const tripSheetResponseSchema = z.object({
   snap_per_km_rate_paise: z.number().nullable(),
   snap_performance_batta_paise: z.number().nullable(),
 
-  trip_date: z.string(),
   start_datetime: z.string().nullable(),
   end_datetime: z.string().nullable(),
   opening_km: z.number().nullable(),
@@ -219,6 +236,29 @@ export const tripSheetResponseSchema = z.object({
   net_payable_paise: z.number(),
   breakdown: z.array(breakdownItemSchema),
 
+  created_at: z.string(),
+});
+
+// Mirrors trip_sheets exactly, post-Task-B1 restructure — sheet-level
+// fields only, plus the vehicles array (hydrated by the service) and
+// tolls (unaffected, still sheet-level).
+export const tripSheetResponseSchema = z.object({
+  id: z.string().uuid(),
+  tenant_id: z.string().uuid(),
+  trip_sheet_number: z.string(),
+  service_type: z.enum(TRIP_SERVICE_TYPES),
+  billing_mode: z.enum(TRIP_BILLING_MODES),
+  status: z.enum(TRIP_STATUSES),
+  customer_id: z.string().uuid().nullable(),
+  manual_customer_name: z.string().nullable(),
+  snapshot_customer_name: z.string().nullable(),
+  snapshot_customer_gstin: z.string().nullable(),
+
+  trip_date: z.string(),
+
+  vehicle_count: z.number(),
+  total_net_payable_paise: z.number(),
+
   booked_by: z.string().nullable(),
   pax_note: z.string().nullable(),
   remarks: z.string().nullable(),
@@ -239,11 +279,16 @@ export const tripSheetResponseSchema = z.object({
   cancelled_by: z.string().nullable(),
   cancellation_reason: z.string().nullable(),
 
+  vehicles: z.array(tripSheetVehicleResponseSchema),
   tolls: z.array(tripTollResponseSchema),
 });
 
 export const tripSheetDetailResponseSchema = z.object({ trip: tripSheetResponseSchema });
 
+// Task B1: list rows no longer carry per-vehicle scalars — vehicle_count
+// plus a "first vehicle" summary (tripSheet.repository.js#list's own
+// LATERAL join), matching the list SCREEN's own "count + first vehicle"
+// design (Part B.2 of this task).
 const tripSheetListRowSchema = z.object({
   id: z.string().uuid(),
   tenant_id: z.string().uuid(),
@@ -252,21 +297,16 @@ const tripSheetListRowSchema = z.object({
   billing_mode: z.enum(TRIP_BILLING_MODES),
   status: z.enum(TRIP_STATUSES),
   customer_id: z.string().uuid().nullable(),
-  vehicle_id: z.string().uuid().nullable(),
-  driver_id: z.string().uuid().nullable(),
-  pricing_source: z.enum(["FLEET", "MANUAL"]),
-  snapshot_vehicle_number: z.string(),
-  snapshot_vehicle_type: z.enum(VEHICLE_TYPES),
   snapshot_customer_name: z.string().nullable(),
   snapshot_customer_gstin: z.string().nullable(),
   trip_date: z.string(),
-  total_km: z.number(),
-  total_hours: z.number(),
-  total_days: z.number(),
-  subtotal_paise: z.number(),
-  gross_paise: z.number(),
-  net_payable_paise: z.number(),
-  advance_paise: z.number(),
+  vehicle_count: z.number(),
+  total_net_payable_paise: z.number(),
+  first_vehicle_id: z.string().uuid().nullable(),
+  first_vehicle_number: z.string().nullable(),
+  first_vehicle_type: z.enum(VEHICLE_TYPES).nullable(),
+  first_vehicle_pricing_source: z.enum(["FLEET", "MANUAL"]).nullable(),
+  sum_total_km: z.number(),
   finalized_at: z.string().nullable(),
   cancelled_at: z.string().nullable(),
   invoice_id: z.string().nullable(),
@@ -284,9 +324,7 @@ export const tripSheetListResponseSchema = z.object({
   }),
   aggregates: z.object({
     sum_net_payable_paise: z.number(),
-    sum_gross_paise: z.number(),
     count_by_status: z.record(z.string(), z.number()),
     sum_net_payable_rupees: z.string(),
-    sum_gross_rupees: z.string(),
   }),
 });

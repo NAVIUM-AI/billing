@@ -1,7 +1,8 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { AxiosError } from "axios";
+import { Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { FormProvider, useForm, type Path } from "react-hook-form";
+import { FormProvider, useFieldArray, useForm, useFormContext, type Path } from "react-hook-form";
 import { useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 
@@ -22,20 +23,23 @@ import {
   VEHICLE_TYPES,
   VEHICLE_TYPE_LABELS,
 } from "@/lib/constants/enums";
+import type { RuleType, TripBillingMode, TripServiceType } from "@/lib/constants/enums";
 import { formatPaiseAsRupees, paiseToRupees } from "@/lib/money";
-import { calculateTripPreview, deriveRuleType, type RuleForCalc } from "@/lib/tripPricingCalc";
-import { tripSheetFormSchema, type TripSheetFormValues, type TripTollFormValues } from "@/lib/schemas/tripSheet";
+import { calculateTripPreview, deriveRuleType, type RuleForCalc, type TripPreviewResult } from "@/lib/tripPricingCalc";
+import {
+  tripSheetFormSchema,
+  type TripSheetFormValues,
+  type TripSheetVehicleFormValues,
+  type TripTollFormValues,
+} from "@/lib/schemas/tripSheet";
 import { cn } from "@/lib/utils";
 import type { ApiErrorResponse } from "@/types/api";
-import type { TripSheet } from "@/types/tripSheet";
+import type { TripSheet, TripSheetVehicle } from "@/types/tripSheet";
 
 const today = () => new Date().toISOString().slice(0, 10);
+const MAX_VEHICLES = 10;
 
-const EMPTY_VALUES: TripSheetFormValues = {
-  service_type: "LOCAL",
-  billing_mode: "GST",
-  customer_id: "",
-  manual_customer_name: "",
+const EMPTY_VEHICLE: TripSheetVehicleFormValues = {
   manual_vehicle_number: "",
   manual_vehicle_type: "SEDAN",
   driver_id: "",
@@ -49,7 +53,6 @@ const EMPTY_VALUES: TripSheetFormValues = {
   driver_batta_per_day_rupees: "",
   per_km_rate_rupees: "",
   performance_batta_rupees: "",
-  trip_date: today(),
   start_datetime: "",
   end_datetime: "",
   total_km: "",
@@ -60,16 +63,24 @@ const EMPTY_VALUES: TripSheetFormValues = {
   permit_rupees: "0",
   fasttag_rupees: "0",
   advance_rupees: "0",
+};
+
+const EMPTY_VALUES: TripSheetFormValues = {
+  service_type: "LOCAL",
+  billing_mode: "GST",
+  customer_id: "",
+  manual_customer_name: "",
+  vehicles: [EMPTY_VEHICLE],
+  trip_date: today(),
   tolls: [],
   booked_by: "",
   pax_note: "",
   remarks: "",
 };
 
-// paise -> rupee-string for prefilling the edit form's (disabled, but
-// still displayed) rate inputs from a trip's immutable snap_* columns.
-// paiseToRupees already returns "" for null, matching
-// numericStringField's optional-field handling.
+// paise -> rupee-string for prefilling the edit form's rate inputs from
+// a vehicle's frozen snap_* columns. paiseToRupees already returns ""
+// for null, matching numericStringField's optional-field handling.
 function paiseFieldToRupeeString(paise: number | null): string {
   return String(paiseToRupees(paise));
 }
@@ -86,43 +97,50 @@ function tollToFormValues(t: TripSheet["tolls"][number]): TripTollFormValues {
   };
 }
 
+function vehicleToFormValues(v: TripSheetVehicle): TripSheetVehicleFormValues {
+  return {
+    manual_vehicle_number: v.snapshot_vehicle_number,
+    manual_vehicle_type: v.snapshot_vehicle_type,
+    driver_id: v.driver_id ?? "",
+    base_price_rupees: paiseFieldToRupeeString(v.snap_base_price_paise),
+    base_hours: v.snap_base_hours != null ? String(v.snap_base_hours) : "",
+    base_km: v.snap_base_km != null ? String(v.snap_base_km) : "",
+    extra_km_rate_rupees: paiseFieldToRupeeString(v.snap_extra_km_rate_paise),
+    extra_hr_rate_rupees: paiseFieldToRupeeString(v.snap_extra_hr_rate_paise),
+    slab_rate_rupees: paiseFieldToRupeeString(v.snap_slab_rate_paise),
+    min_km_per_day: v.snap_min_km_per_day != null ? String(v.snap_min_km_per_day) : "",
+    driver_batta_per_day_rupees: paiseFieldToRupeeString(v.snap_driver_batta_per_day_paise),
+    per_km_rate_rupees: paiseFieldToRupeeString(v.snap_per_km_rate_paise),
+    performance_batta_rupees: paiseFieldToRupeeString(v.snap_performance_batta_paise),
+    start_datetime: v.start_datetime ? v.start_datetime.slice(0, 16) : "",
+    end_datetime: v.end_datetime ? v.end_datetime.slice(0, 16) : "",
+    total_km: String(v.total_km),
+    total_hours: String(v.total_hours),
+    total_days: String(v.total_days),
+    toll_rupees: String(v.toll_paise / 100),
+    parking_rupees: String(v.parking_paise / 100),
+    permit_rupees: String(v.permit_paise / 100),
+    fasttag_rupees: String(v.fasttag_paise / 100),
+    advance_rupees: String(v.advance_paise / 100),
+  };
+}
+
+// Task B1: vehicles is a PATCH-able whole-array-replace now (unlike
+// before, when every vehicle/rate field was create-only immutable —
+// see tripSheets.api.ts's own toUpdatePayload comment), so the edit
+// form's vehicle cards are editable here, not disabled — this matches
+// the actual backend capability rather than a stale immutability
+// restriction the restructure removed. Only sheet-level identity
+// (service_type/billing_mode/customer) stays immutable in edit mode,
+// same as before.
 function tripToFormValues(trip: TripSheet): TripSheetFormValues {
   return {
     service_type: trip.service_type,
     billing_mode: trip.billing_mode,
     customer_id: trip.customer_id ?? "",
     manual_customer_name: trip.manual_customer_name ?? "",
-    // Vehicle/rate fields are immutable post-create (not in
-    // updateTripSheetSchema at all — same as fleet mode's vehicle_id/
-    // pricing_rule_id) — prefilled here purely for display on the edit
-    // form, whose inputs render `disabled` for these fields. Works
-    // identically for a FLEET-mode trip being edited (pre-existing,
-    // this task doesn't touch those) since snapshot_vehicle_number/
-    // type and snap_* are populated the same way in both modes.
-    manual_vehicle_number: trip.snapshot_vehicle_number,
-    manual_vehicle_type: trip.snapshot_vehicle_type,
-    driver_id: trip.driver_id ?? "",
-    base_price_rupees: paiseFieldToRupeeString(trip.snap_base_price_paise),
-    base_hours: trip.snap_base_hours != null ? String(trip.snap_base_hours) : "",
-    base_km: trip.snap_base_km != null ? String(trip.snap_base_km) : "",
-    extra_km_rate_rupees: paiseFieldToRupeeString(trip.snap_extra_km_rate_paise),
-    extra_hr_rate_rupees: paiseFieldToRupeeString(trip.snap_extra_hr_rate_paise),
-    slab_rate_rupees: paiseFieldToRupeeString(trip.snap_slab_rate_paise),
-    min_km_per_day: trip.snap_min_km_per_day != null ? String(trip.snap_min_km_per_day) : "",
-    driver_batta_per_day_rupees: paiseFieldToRupeeString(trip.snap_driver_batta_per_day_paise),
-    per_km_rate_rupees: paiseFieldToRupeeString(trip.snap_per_km_rate_paise),
-    performance_batta_rupees: paiseFieldToRupeeString(trip.snap_performance_batta_paise),
+    vehicles: trip.vehicles.map(vehicleToFormValues),
     trip_date: trip.trip_date,
-    start_datetime: trip.start_datetime ? trip.start_datetime.slice(0, 16) : "",
-    end_datetime: trip.end_datetime ? trip.end_datetime.slice(0, 16) : "",
-    total_km: String(trip.total_km),
-    total_hours: String(trip.total_hours),
-    total_days: String(trip.total_days),
-    toll_rupees: String(trip.toll_paise / 100),
-    parking_rupees: String(trip.parking_paise / 100),
-    permit_rupees: String(trip.permit_paise / 100),
-    fasttag_rupees: String(trip.fasttag_paise / 100),
-    advance_rupees: String(trip.advance_paise / 100),
     tolls: trip.tolls.map(tollToFormValues),
     booked_by: trip.booked_by ?? "",
     pax_note: trip.pax_note ?? "",
@@ -135,6 +153,232 @@ function extractApiError(err: unknown) {
     return (err.response?.data as ApiErrorResponse | undefined)?.error;
   }
   return undefined;
+}
+
+function toPaiseOrUndef(rupees: string | undefined): number | undefined {
+  return rupees ? Math.round(Number(rupees) * 100) : undefined;
+}
+
+function vehicleRuleForCalc(v: TripSheetVehicleFormValues): RuleForCalc {
+  return {
+    base_price_paise: toPaiseOrUndef(v.base_price_rupees),
+    base_hours: v.base_hours ? Number(v.base_hours) : undefined,
+    base_km: v.base_km ? Number(v.base_km) : undefined,
+    extra_km_rate_paise: toPaiseOrUndef(v.extra_km_rate_rupees),
+    extra_hr_rate_paise: toPaiseOrUndef(v.extra_hr_rate_rupees),
+    slab_rate_paise: toPaiseOrUndef(v.slab_rate_rupees),
+    min_km_per_day: v.min_km_per_day ? Number(v.min_km_per_day) : undefined,
+    driver_batta_per_day_paise: toPaiseOrUndef(v.driver_batta_per_day_rupees),
+    per_km_rate_paise: toPaiseOrUndef(v.per_km_rate_rupees),
+    performance_batta_paise: toPaiseOrUndef(v.performance_batta_rupees),
+  };
+}
+
+// Same required-field set as MANUAL_RATE_FIELDS_BY_FORMULA in
+// lib/schemas/tripSheet.ts, checked directly against the rule object's
+// own relevant keys so this can't drift from what calculateTripPreview
+// will actually use.
+const REQUIRED_KEYS_BY_FORMULA: Record<RuleType, (keyof RuleForCalc)[]> = {
+  LOCAL_PACKAGE: ["base_price_paise", "base_hours", "base_km", "extra_km_rate_paise", "extra_hr_rate_paise"],
+  OUTSTATION_SLAB: ["slab_rate_paise", "min_km_per_day", "driver_batta_per_day_paise"],
+  PERFORMANCE: ["per_km_rate_paise", "performance_batta_paise"],
+};
+
+function vehiclePreview(
+  v: TripSheetVehicleFormValues,
+  serviceType: TripServiceType,
+  billingMode: TripBillingMode,
+  ruleType: RuleType,
+  effectiveTollPaise: number,
+): TripPreviewResult | null {
+  const rule = vehicleRuleForCalc(v);
+  const complete = REQUIRED_KEYS_BY_FORMULA[ruleType].every((k) => rule[k] != null);
+  if (!complete || v.total_km === "") return null;
+  return calculateTripPreview(serviceType, billingMode, rule, {
+    totalKm: Number(v.total_km) || 0,
+    totalHours: Number(v.total_hours) || 0,
+    totalDays: Number(v.total_days) || 1,
+    tollPaise: effectiveTollPaise,
+    parkingPaise: Math.round(Number(v.parking_rupees || 0) * 100),
+    permitPaise: Math.round(Number(v.permit_rupees || 0) * 100),
+    fasttagPaise: Math.round(Number(v.fasttag_rupees || 0) * 100),
+    advancePaise: Math.round(Number(v.advance_rupees || 0) * 100),
+  });
+}
+
+// One vehicle card — Vehicle identity, Rate Details (dynamic per
+// formula), Usage/Charges, and a per-card live total footer. `preview`
+// is computed by the PARENT (which owns the itemized-tolls-override
+// logic that spans the whole form, not just one card) and passed down.
+function VehicleFormCard({
+  index,
+  onRemove,
+  canRemove,
+  serviceType,
+  billingMode,
+  ruleType,
+  preview,
+}: {
+  index: number;
+  onRemove: () => void;
+  canRemove: boolean;
+  serviceType: TripServiceType;
+  billingMode: TripBillingMode;
+  ruleType: RuleType;
+  preview: TripPreviewResult | null;
+}) {
+  const { register } = useFormContext<TripSheetFormValues>();
+  const p = (field: keyof TripSheetVehicleFormValues) => `vehicles.${index}.${field}` as const;
+
+  return (
+    <div className="rounded-lg border bg-white p-4">
+      <div className="mb-3 flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-gray-700">Vehicle {index + 1}</h3>
+        <button
+          type="button"
+          onClick={onRemove}
+          disabled={!canRemove}
+          aria-label="Remove vehicle"
+          className={cn("text-gray-400 hover:text-red-600", !canRemove && "cursor-not-allowed opacity-30")}
+        >
+          <Trash2 className="h-4 w-4" />
+        </button>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <FormField name={p("manual_vehicle_number")} label="Vehicle Number">
+          <Input id={p("manual_vehicle_number")} placeholder="e.g. KA51AK1031" className="uppercase" {...register(p("manual_vehicle_number"))} />
+        </FormField>
+        <div>
+          <Label htmlFor={p("manual_vehicle_type")}>Vehicle Type</Label>
+          <select
+            id={p("manual_vehicle_type")}
+            {...register(p("manual_vehicle_type"))}
+            className="mt-1.5 flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            {VEHICLE_TYPES.map((t) => (
+              <option key={t} value={t}>
+                {VEHICLE_TYPE_LABELS[t]}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div className="mt-3">
+        <p className="mb-2 text-xs text-gray-500">
+          {ruleType === "LOCAL_PACKAGE" && "Local package: base slab + extra km/hour rates."}
+          {ruleType === "OUTSTATION_SLAB" && "Outstation slab: per-km rate with a minimum km/day floor."}
+          {ruleType === "PERFORMANCE" && "Performance: per-km rate + a flat batta (internal cost tracking, not a GST invoice)."}
+        </p>
+
+        {ruleType === "LOCAL_PACKAGE" && (
+          <div className="grid grid-cols-2 gap-3">
+            <FormField name={p("base_price_rupees")} label="Base Price (₹)">
+              <Input id={p("base_price_rupees")} type="number" step="0.01" {...register(p("base_price_rupees"))} />
+            </FormField>
+            <FormField name={p("base_hours")} label="Base Hours">
+              <Input id={p("base_hours")} type="number" placeholder="8" {...register(p("base_hours"))} />
+            </FormField>
+            <FormField name={p("base_km")} label="Base Km">
+              <Input id={p("base_km")} type="number" placeholder="80" {...register(p("base_km"))} />
+            </FormField>
+            <FormField name={p("extra_km_rate_rupees")} label="Extra Km Rate (₹/km)">
+              <Input id={p("extra_km_rate_rupees")} type="number" step="0.01" {...register(p("extra_km_rate_rupees"))} />
+            </FormField>
+            <FormField name={p("extra_hr_rate_rupees")} label="Extra Hour Rate (₹/hr)">
+              <Input id={p("extra_hr_rate_rupees")} type="number" step="0.01" {...register(p("extra_hr_rate_rupees"))} />
+            </FormField>
+          </div>
+        )}
+
+        {ruleType === "OUTSTATION_SLAB" && (
+          <div className="grid grid-cols-2 gap-3">
+            <FormField name={p("slab_rate_rupees")} label="Slab Rate (₹/km)">
+              <Input id={p("slab_rate_rupees")} type="number" step="0.01" {...register(p("slab_rate_rupees"))} />
+            </FormField>
+            <FormField name={p("min_km_per_day")} label="Min Km Per Day">
+              <Input id={p("min_km_per_day")} type="number" placeholder="250" {...register(p("min_km_per_day"))} />
+            </FormField>
+            <FormField name={p("driver_batta_per_day_rupees")} label="Driver Batta Per Day (₹)">
+              <Input id={p("driver_batta_per_day_rupees")} type="number" step="0.01" {...register(p("driver_batta_per_day_rupees"))} />
+            </FormField>
+          </div>
+        )}
+
+        {ruleType === "PERFORMANCE" && (
+          <div className="grid grid-cols-2 gap-3">
+            <FormField name={p("per_km_rate_rupees")} label="Per Km Rate (₹/km)">
+              <Input id={p("per_km_rate_rupees")} type="number" step="0.01" {...register(p("per_km_rate_rupees"))} />
+            </FormField>
+            {/* Flat amount, not "per day" — see MANUAL_RATE_FIELDS_BY_FORMULA's own comment. */}
+            <FormField name={p("performance_batta_rupees")} label="Performance Batta (₹)">
+              <Input id={p("performance_batta_rupees")} type="number" step="0.01" {...register(p("performance_batta_rupees"))} />
+            </FormField>
+          </div>
+        )}
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 gap-3">
+        <FormField name={p("total_km")} label={billingMode === "PERFORMANCE" ? "Running KM" : "Total KM"}>
+          <Input id={p("total_km")} type="number" {...register(p("total_km"))} />
+        </FormField>
+        <FormField name={p("total_hours")} label="Total Hours">
+          <Input id={p("total_hours")} type="number" {...register(p("total_hours"))} />
+        </FormField>
+      </div>
+
+      {serviceType === "OUTSTATION" && (
+        <>
+          <div className="mt-3 grid grid-cols-2 gap-3">
+            <FormField name={p("total_days")} label="Total Days">
+              <Input id={p("total_days")} type="number" min={1} {...register(p("total_days"))} />
+            </FormField>
+            <FormField name={p("advance_rupees")} label="Advance (₹, optional)">
+              <Input id={p("advance_rupees")} type="number" step="0.01" {...register(p("advance_rupees"))} />
+            </FormField>
+          </div>
+          <div className="mt-3 grid grid-cols-3 gap-3">
+            <FormField name={p("parking_rupees")} label="Parking (₹)">
+              <Input id={p("parking_rupees")} type="number" step="0.01" {...register(p("parking_rupees"))} />
+            </FormField>
+            <FormField name={p("permit_rupees")} label="Permit (₹)">
+              <Input id={p("permit_rupees")} type="number" step="0.01" {...register(p("permit_rupees"))} />
+            </FormField>
+            <FormField name={p("fasttag_rupees")} label="Fasttag (₹)">
+              <Input id={p("fasttag_rupees")} type="number" step="0.01" {...register(p("fasttag_rupees"))} />
+            </FormField>
+          </div>
+        </>
+      )}
+
+      {serviceType !== "OUTSTATION" && (
+        <div className="mt-3 grid grid-cols-2 gap-3">
+          <FormField name={p("toll_rupees")} label="Toll (₹, optional)">
+            <Input id={p("toll_rupees")} type="number" step="0.01" {...register(p("toll_rupees"))} />
+          </FormField>
+        </div>
+      )}
+
+      {preview && (
+        <div className="mt-3 flex flex-col gap-1 border-t pt-3 text-xs text-gray-600">
+          {preview.breakdown.map((item, i) => (
+            <div key={i} className="flex justify-between">
+              <span>
+                {item.label}
+                {item.detail && <span className="text-gray-400"> ({item.detail})</span>}
+              </span>
+              <span>{formatPaiseAsRupees(item.value_paise)}</span>
+            </div>
+          ))}
+          <div className="mt-1 flex justify-between border-t pt-1 text-sm font-semibold text-gray-900">
+            <span>Taxable Value</span>
+            <span>{formatPaiseAsRupees(preview.net_payable_paise)}</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function TripSheetFormPage() {
@@ -153,7 +397,8 @@ export function TripSheetFormPage() {
     resolver: zodResolver(tripSheetFormSchema),
     defaultValues: EMPTY_VALUES,
   });
-  const { register, handleSubmit, reset, setError, watch, setValue } = form;
+  const { register, handleSubmit, reset, setError, watch, setValue, control } = form;
+  const { fields: vehicleFields, append, remove } = useFieldArray({ control, name: "vehicles" });
 
   useEffect(() => {
     if (isEdit && existingTrip) {
@@ -164,57 +409,24 @@ export function TripSheetFormPage() {
 
   const serviceType = watch("service_type");
   const billingMode = watch("billing_mode");
-  const totalKm = watch("total_km");
-  const totalHours = watch("total_hours");
-  const totalDays = watch("total_days");
-  const tollRupees = watch("toll_rupees");
-  const parkingRupees = watch("parking_rupees");
-  const permitRupees = watch("permit_rupees");
-  const fasttagRupees = watch("fasttag_rupees");
-  const advanceRupees = watch("advance_rupees");
+  const vehicles = watch("vehicles");
   const tolls = watch("tolls");
-  const basePriceRupees = watch("base_price_rupees");
-  const baseHours = watch("base_hours");
-  const baseKm = watch("base_km");
-  const extraKmRateRupees = watch("extra_km_rate_rupees");
-  const extraHrRateRupees = watch("extra_hr_rate_rupees");
-  const slabRateRupees = watch("slab_rate_rupees");
-  const minKmPerDay = watch("min_km_per_day");
-  const driverBattaPerDayRupees = watch("driver_batta_per_day_rupees");
-  const perKmRateRupees = watch("per_km_rate_rupees");
-  const performanceBattaRupees = watch("performance_batta_rupees");
-
   const ruleType = deriveRuleType(serviceType, billingMode);
 
-  // The manual rate fields ARE the rule for the live preview — same
-  // shape calculateTripPreview already expects, built straight from
-  // this render's watched form values instead of a fetched fleet rule.
-  // Only the active formula's fields matter; the others are simply
-  // unset (undefined) on whichever RuleForCalc this produces.
-  const toPaise = (rupees: string | undefined) => (rupees ? Math.round(Number(rupees) * 100) : undefined);
-  const manualRule: RuleForCalc = {
-    base_price_paise: toPaise(basePriceRupees),
-    base_hours: baseHours ? Number(baseHours) : undefined,
-    base_km: baseKm ? Number(baseKm) : undefined,
-    extra_km_rate_paise: toPaise(extraKmRateRupees),
-    extra_hr_rate_paise: toPaise(extraHrRateRupees),
-    slab_rate_paise: toPaise(slabRateRupees),
-    min_km_per_day: minKmPerDay ? Number(minKmPerDay) : undefined,
-    driver_batta_per_day_paise: toPaise(driverBattaPerDayRupees),
-    per_km_rate_paise: toPaise(perKmRateRupees),
-    performance_batta_paise: toPaise(performanceBattaRupees),
-  };
-  // Whether every rate field the ACTIVE formula needs has been filled
-  // in yet — same required-field set as MANUAL_RATE_FIELDS_BY_FORMULA
-  // in lib/schemas/tripSheet.ts, checked directly against the rule
-  // object's own relevant keys so this can't drift from what
-  // calculateTripPreview will actually use.
-  const requiredKeysByFormula: Record<string, (keyof RuleForCalc)[]> = {
-    LOCAL_PACKAGE: ["base_price_paise", "base_hours", "base_km", "extra_km_rate_paise", "extra_hr_rate_paise"],
-    OUTSTATION_SLAB: ["slab_rate_paise", "min_km_per_day", "driver_batta_per_day_paise"],
-    PERFORMANCE: ["per_km_rate_paise", "performance_batta_paise"],
-  };
-  const rateFieldsComplete = requiredKeysByFormula[ruleType].every((k) => manualRule[k] != null);
+  // Itemized tolls only apply to a lone vehicle (see
+  // tripSheet.validator.js's own tolls.multiVehicleUnsupported check) —
+  // their sum overrides vehicle #1's own toll_rupees for the preview,
+  // mirroring tripSheet.service.js#createTripSheet's exact precedence.
+  const itemizedTollsSumPaise = tolls.reduce((sum, t) => sum + Math.round(Number(t.amount_rupees || 0) * 100), 0);
+  const previews = vehicles.map((v, idx) => {
+    const effectiveTollPaise =
+      idx === 0 && vehicles.length === 1 && serviceType === "OUTSTATION" && tolls.length > 0
+        ? itemizedTollsSumPaise
+        : Math.round(Number(v.toll_rupees || 0) * 100);
+    return vehiclePreview(v, serviceType, billingMode, ruleType, effectiveTollPaise);
+  });
+  const grandTotalPaise = previews.reduce((sum, pv) => sum + (pv?.net_payable_paise ?? 0), 0);
+  const allPreviewsReady = previews.length > 0 && previews.every((pv) => pv !== null);
 
   // ── EARLY RETURNS (after all hooks above have run) ──
   if (isEdit && isLoadingTrip) {
@@ -233,28 +445,6 @@ export function TripSheetFormPage() {
       />
     );
   }
-
-  // Effective toll (client-mirror of the same "itemized wins over
-  // lump-sum" rule tripSheet.service.js#createTripSheet applies) for
-  // the live preview only.
-  const tollPaiseForPreview =
-    serviceType === "OUTSTATION" && tolls.length > 0
-      ? tolls.reduce((sum, t) => sum + Math.round(Number(t.amount_rupees || 0) * 100), 0)
-      : Math.round(Number(tollRupees || 0) * 100);
-
-  const preview =
-    rateFieldsComplete && totalKm !== ""
-      ? calculateTripPreview(serviceType, billingMode, manualRule, {
-          totalKm: Number(totalKm) || 0,
-          totalHours: Number(totalHours) || 0,
-          totalDays: Number(totalDays) || 1,
-          tollPaise: tollPaiseForPreview,
-          parkingPaise: Math.round(Number(parkingRupees || 0) * 100),
-          permitPaise: Math.round(Number(permitRupees || 0) * 100),
-          fasttagPaise: Math.round(Number(fasttagRupees || 0) * 100),
-          advancePaise: Math.round(Number(advanceRupees || 0) * 100),
-        })
-      : null;
 
   async function onSubmit(values: TripSheetFormValues) {
     try {
@@ -278,7 +468,12 @@ export function TripSheetFormPage() {
         toast.error("Please fix the highlighted fields");
       } else if (apiErr.code === "NO_APPLICABLE_PRICING_RULE") {
         toast.error(apiErr.message);
-      } else if (apiErr.code === "TOLL_INPUT_CONFLICT" || apiErr.code === "INVALID_KM_RANGE") {
+      } else if (
+        apiErr.code === "TOLL_INPUT_CONFLICT" ||
+        apiErr.code === "INVALID_KM_RANGE" ||
+        apiErr.code === "TOLLS_MULTI_VEHICLE_UNSUPPORTED" ||
+        apiErr.code === "INVALID_VEHICLE_ITEM"
+      ) {
         toast.error(apiErr.message);
       } else {
         toast.error(apiErr.message || "Something went wrong. Try again.");
@@ -408,162 +603,58 @@ export function TripSheetFormPage() {
               </div>
             </div>
 
-            {/* Card 3: Vehicle — manual entry only (trip-sheets-manual-mode).
+            {/* Vehicles — 1 to 10 fully self-contained cards (Task B1).
                 Most trips are sub-contracted to partner operators outside
-                the registered fleet, so this form no longer offers a
-                fleet vehicle picker at all — Vehicles/Drivers/Pricing
-                Rules screens still exist, just aren't consulted here.
-                Immutable post-create, same as fleet mode's vehicle_id
-                was — disabled (not omitted) in edit mode so the original
-                entry stays visible. */}
-            <div className="rounded-lg border bg-white p-4">
-              <h2 className="mb-3 text-sm font-semibold text-gray-700">Vehicle</h2>
-              <div className="grid grid-cols-2 gap-3">
-                <FormField name="manual_vehicle_number" label="Vehicle Number">
-                  <Input
-                    id="manual_vehicle_number"
-                    placeholder="e.g. KA51AK1031"
-                    className="uppercase"
-                    disabled={isEdit}
-                    {...register("manual_vehicle_number")}
+                the registered fleet, so this form still offers manual
+                entry only (no fleet vehicle picker) — see the original
+                trip-sheets-manual-mode task. Unlike before, these are
+                editable on the edit form too — the whole array is now
+                PATCH-able (delete + reinsert), not create-only immutable. */}
+            <div>
+              <div className="mb-3 flex items-center justify-between">
+                <h2 className="text-sm font-semibold text-gray-700">Vehicles ({vehicleFields.length})</h2>
+                <button
+                  type="button"
+                  onClick={() => append(EMPTY_VEHICLE)}
+                  disabled={vehicleFields.length >= MAX_VEHICLES}
+                  className={cn(
+                    "text-sm font-medium text-primary-600 hover:text-primary-700",
+                    vehicleFields.length >= MAX_VEHICLES && "cursor-not-allowed opacity-40",
+                  )}
+                >
+                  + Add Vehicle
+                </button>
+              </div>
+              <div className="flex flex-col gap-4">
+                {vehicleFields.map((field, index) => (
+                  <VehicleFormCard
+                    key={field.id}
+                    index={index}
+                    onRemove={() => remove(index)}
+                    canRemove={vehicleFields.length > 1}
+                    serviceType={serviceType}
+                    billingMode={billingMode}
+                    ruleType={ruleType}
+                    preview={previews[index] ?? null}
                   />
-                </FormField>
-                <div>
-                  <Label htmlFor="manual_vehicle_type">Vehicle Type</Label>
-                  <select
-                    id="manual_vehicle_type"
-                    disabled={isEdit}
-                    {...register("manual_vehicle_type")}
-                    className="mt-1.5 flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    {VEHICLE_TYPES.map((t) => (
-                      <option key={t} value={t}>
-                        {VEHICLE_TYPE_LABELS[t]}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+                ))}
               </div>
-              {isEdit && <p className="mt-2 text-xs text-gray-500">Vehicle details can't be changed after creation.</p>}
             </div>
 
-            {/* Card: Rate Details — dynamic per formula (Formula A/B/C) */}
-            <div className="rounded-lg border bg-white p-4">
-              <h2 className="mb-1 text-sm font-semibold text-gray-700">Rate Details</h2>
-              <p className="mb-3 text-xs text-gray-500">
-                {ruleType === "LOCAL_PACKAGE" && "Local package: base slab + extra km/hour rates."}
-                {ruleType === "OUTSTATION_SLAB" && "Outstation slab: per-km rate with a minimum km/day floor."}
-                {ruleType === "PERFORMANCE" && "Performance: per-km rate + a flat batta (internal cost tracking, not a GST invoice)."}
+            {/* Itemized toll-plaza receipts — only meaningful against a
+                single vehicle's toll_paise (see this form's tolls
+                comment); hidden once a second vehicle is added. */}
+            {serviceType === "OUTSTATION" && vehicleFields.length === 1 && (
+              <div className="rounded-lg border bg-white p-4">
+                <TollsSubList />
+              </div>
+            )}
+            {serviceType === "OUTSTATION" && vehicleFields.length > 1 && tolls.length > 0 && (
+              <p className="text-xs text-amber-600">
+                Itemized toll receipts only apply to single-vehicle trips — remove extra vehicles or clear the toll list, or use
+                each vehicle's own Toll field instead.
               </p>
-
-              {ruleType === "LOCAL_PACKAGE" && (
-                <div className="grid grid-cols-2 gap-3">
-                  <FormField name="base_price_rupees" label="Base Price (₹)">
-                    <Input id="base_price_rupees" type="number" step="0.01" disabled={isEdit} {...register("base_price_rupees")} />
-                  </FormField>
-                  <FormField name="base_hours" label="Base Hours">
-                    <Input id="base_hours" type="number" placeholder="8" disabled={isEdit} {...register("base_hours")} />
-                  </FormField>
-                  <FormField name="base_km" label="Base Km">
-                    <Input id="base_km" type="number" placeholder="80" disabled={isEdit} {...register("base_km")} />
-                  </FormField>
-                  <FormField name="extra_km_rate_rupees" label="Extra Km Rate (₹/km)">
-                    <Input id="extra_km_rate_rupees" type="number" step="0.01" disabled={isEdit} {...register("extra_km_rate_rupees")} />
-                  </FormField>
-                  <FormField name="extra_hr_rate_rupees" label="Extra Hour Rate (₹/hr)">
-                    <Input id="extra_hr_rate_rupees" type="number" step="0.01" disabled={isEdit} {...register("extra_hr_rate_rupees")} />
-                  </FormField>
-                </div>
-              )}
-
-              {ruleType === "OUTSTATION_SLAB" && (
-                <div className="grid grid-cols-2 gap-3">
-                  <FormField name="slab_rate_rupees" label="Slab Rate (₹/km)">
-                    <Input id="slab_rate_rupees" type="number" step="0.01" disabled={isEdit} {...register("slab_rate_rupees")} />
-                  </FormField>
-                  <FormField name="min_km_per_day" label="Min Km Per Day">
-                    <Input id="min_km_per_day" type="number" placeholder="250" disabled={isEdit} {...register("min_km_per_day")} />
-                  </FormField>
-                  <FormField name="driver_batta_per_day_rupees" label="Driver Batta Per Day (₹)">
-                    <Input
-                      id="driver_batta_per_day_rupees"
-                      type="number"
-                      step="0.01"
-                      disabled={isEdit}
-                      {...register("driver_batta_per_day_rupees")}
-                    />
-                  </FormField>
-                </div>
-              )}
-
-              {ruleType === "PERFORMANCE" && (
-                <div className="grid grid-cols-2 gap-3">
-                  <FormField name="per_km_rate_rupees" label="Per Km Rate (₹/km)">
-                    <Input id="per_km_rate_rupees" type="number" step="0.01" disabled={isEdit} {...register("per_km_rate_rupees")} />
-                  </FormField>
-                  {/* Flat amount, not "per day" — see this file's top-level
-                      MANUAL_RATE_FIELDS_BY_FORMULA comment (Part A finding). */}
-                  <FormField name="performance_batta_rupees" label="Performance Batta (₹)">
-                    <Input
-                      id="performance_batta_rupees"
-                      type="number"
-                      step="0.01"
-                      disabled={isEdit}
-                      {...register("performance_batta_rupees")}
-                    />
-                  </FormField>
-                </div>
-              )}
-              {isEdit && <p className="mt-2 text-xs text-gray-500">Rates can't be changed after creation.</p>}
-            </div>
-
-            {/* Card 4: Usage — LOCAL vs OUTSTATION shape */}
-            <div className="rounded-lg border bg-white p-4">
-              <h2 className="mb-3 text-sm font-semibold text-gray-700">Trip Usage</h2>
-              <div className="grid grid-cols-2 gap-3">
-                <FormField name="total_km" label={billingMode === "PERFORMANCE" ? "Running KM" : "Total KM"}>
-                  <Input id="total_km" type="number" {...register("total_km")} />
-                </FormField>
-                <FormField name="total_hours" label="Total Hours">
-                  <Input id="total_hours" type="number" {...register("total_hours")} />
-                </FormField>
-              </div>
-
-              {serviceType === "OUTSTATION" && (
-                <>
-                  <div className="mt-3 grid grid-cols-2 gap-3">
-                    <FormField name="total_days" label="Total Days">
-                      <Input id="total_days" type="number" min={1} {...register("total_days")} />
-                    </FormField>
-                    <FormField name="advance_rupees" label="Advance (₹, optional)">
-                      <Input id="advance_rupees" type="number" step="0.01" {...register("advance_rupees")} />
-                    </FormField>
-                  </div>
-                  <div className="mt-3 grid grid-cols-3 gap-3">
-                    <FormField name="parking_rupees" label="Parking (₹)">
-                      <Input id="parking_rupees" type="number" step="0.01" {...register("parking_rupees")} />
-                    </FormField>
-                    <FormField name="permit_rupees" label="Permit (₹)">
-                      <Input id="permit_rupees" type="number" step="0.01" {...register("permit_rupees")} />
-                    </FormField>
-                    <FormField name="fasttag_rupees" label="Fasttag (₹)">
-                      <Input id="fasttag_rupees" type="number" step="0.01" {...register("fasttag_rupees")} />
-                    </FormField>
-                  </div>
-                  <div className="mt-3">
-                    <TollsSubList />
-                  </div>
-                </>
-              )}
-
-              {serviceType !== "OUTSTATION" && (
-                <div className="mt-3 grid grid-cols-2 gap-3">
-                  <FormField name="toll_rupees" label="Toll (₹, optional)">
-                    <Input id="toll_rupees" type="number" step="0.01" {...register("toll_rupees")} />
-                  </FormField>
-                </div>
-              )}
-            </div>
+            )}
 
             <div className="flex justify-end gap-2">
               <Button type="button" variant="secondary" onClick={() => navigate(-1)}>
@@ -577,25 +668,22 @@ export function TripSheetFormPage() {
         </FormProvider>
       </div>
 
-      {/* Live Total Preview */}
+      {/* Live Total Preview — per-vehicle lines + a sheet-level sum */}
       <div className="lg:sticky lg:top-4 lg:self-start">
         <div className="rounded-lg border bg-white p-4">
           <h2 className="mb-3 text-sm font-semibold text-gray-700">Live Total Preview</h2>
-          {!rateFieldsComplete && <p className="text-sm text-gray-500">Fill in the rate details to see a live total.</p>}
-          {preview && (
-            <div className="flex flex-col gap-1.5 text-sm">
-              {preview.breakdown.map((item, i) => (
+          {!allPreviewsReady && <p className="text-sm text-gray-500">Fill in every vehicle's rate details to see a live total.</p>}
+          {allPreviewsReady && (
+            <div className="flex flex-col gap-2 text-sm">
+              {previews.map((pv, i) => (
                 <div key={i} className="flex justify-between text-gray-600">
-                  <span>
-                    {item.label}
-                    {item.detail && <span className="text-xs text-gray-400"> ({item.detail})</span>}
-                  </span>
-                  <span>{formatPaiseAsRupees(item.value_paise)}</span>
+                  <span>Vehicle {i + 1}</span>
+                  <span>{formatPaiseAsRupees(pv!.net_payable_paise)}</span>
                 </div>
               ))}
               <div className="mt-2 flex justify-between border-t pt-2 font-semibold text-gray-900">
                 <span>Net Payable</span>
-                <span>{formatPaiseAsRupees(preview.net_payable_paise)}</span>
+                <span>{formatPaiseAsRupees(grandTotalPaise)}</span>
               </div>
               <p className="mt-1 text-xs text-gray-400">
                 Preview only — the backend recomputes this on save and is the source of truth.

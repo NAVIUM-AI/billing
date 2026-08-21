@@ -47,6 +47,7 @@ const { buildTenantSnapshot, buildCustomerSnapshot } = require("../utils/invoice
 const invoiceRepo = require("../repositories/invoice.repository");
 const lineRepo = require("../repositories/invoiceLine.repository");
 const tripRepo = require("../repositories/tripSheet.repository");
+const vehicleLineRepo = require("../repositories/tripSheetVehicle.repository");
 const customerRepo = require("../repositories/customer.repository");
 const tenantRepo = require("../repositories/tenant.repository");
 const creditNoteRepo = require("../repositories/creditNote.repository");
@@ -145,10 +146,44 @@ async function resolveTripsForInvoice(tenantId, tripSheetIds, excludeInvoiceId, 
         invoice_customer_id: customerId,
       });
     }
+
+    // Task B1 / Part G hard checkpoint: buildInvoiceLines only knows how
+    // to fan ONE trip into ONE invoice_line — a multi-vehicle trip must
+    // never reach it. getInvoiceableTripsForCustomer's own picker query
+    // (tripSheet.repository.js#findInvoiceableForCustomer) already
+    // excludes vehicle_count > 1 trips at the source; this is
+    // defense-in-depth against a request that names one directly by id.
+    // GST multi-vehicle fan-out is explicitly OUT OF SCOPE here — that's
+    // a separate, later task (B2).
+    if (trip.vehicle_count > 1) {
+      throw apiError(
+        400,
+        "MULTI_VEHICLE_TRIP_NOT_INVOICEABLE",
+        "This trip has more than one vehicle and cannot be added to a GST invoice yet.",
+        { trip_id: id, vehicle_count: trip.vehicle_count },
+      );
+    }
   }
 
+  // Hydrate each trip with its single vehicle's fields (Task B1 moved
+  // snapshot_vehicle_number/type, total_km/hours/days, and every
+  // per-vehicle charge/total column off trip_sheets onto
+  // trip_sheet_vehicles) — buildInvoiceLines below reads those fields
+  // straight off the object it's given, unchanged since Task A; this
+  // merges the child row's fields onto the SAME object rather than
+  // touching buildInvoiceLines itself. Vehicle spread FIRST so the
+  // trip's own id/tenant_id/created_at win the collision — reusing the
+  // vehicle row's own id here would silently corrupt invoice_lines'
+  // trip_sheet_id.
+  const vehiclesBySheet = await vehicleLineRepo.listBySheetIds(tenantId, tripSheetIds, client);
+  const hydrated = tripSheetIds.map((id) => {
+    const trip = foundById.get(id);
+    const vehicle = vehiclesBySheet.get(id)?.[0];
+    return { ...vehicle, ...trip };
+  });
+
   // Preserve caller order for line_number assignment.
-  return tripSheetIds.map((id) => foundById.get(id));
+  return hydrated;
 }
 
 /**
@@ -222,7 +257,12 @@ const REIMBURSEMENT_FIELDS = [
  * @returns {Promise<object>} { toll_paise, toll_manual_override, parking_paise, ... }
  */
 async function computeEffectiveReimbursements({ tenantId, tripIds, client, userInput, existingInvoice }) {
-  const sums = await tripRepo.summarizeReimbursements(tenantId, tripIds, client);
+  // Task B1 moved toll/parking/permit/fasttag_paise off trip_sheets
+  // onto trip_sheet_vehicles — summarizeReimbursementsBySheets sums
+  // across every vehicle under each sheet (in practice always exactly
+  // one here, since resolveTripsForInvoice already rejects
+  // multi-vehicle trips before this is ever called).
+  const sums = await vehicleLineRepo.summarizeReimbursementsBySheets(tenantId, tripIds, client);
 
   const result = {};
   for (const f of REIMBURSEMENT_FIELDS) {

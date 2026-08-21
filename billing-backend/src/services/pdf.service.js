@@ -48,6 +48,7 @@ const invoiceRepo = require("../repositories/invoice.repository");
 const creditNoteRepo = require("../repositories/creditNote.repository");
 const invoiceLineRepo = require("../repositories/invoiceLine.repository");
 const tripSheetRepo = require("../repositories/tripSheet.repository");
+const vehicleLineRepo = require("../repositories/tripSheetVehicle.repository");
 const customerRepo = require("../repositories/customer.repository");
 const tenantRepo = require("../repositories/tenant.repository");
 const { apiError } = require("../utils/httpError");
@@ -339,39 +340,73 @@ function pickTripSheetTemplateName(trip, templateVersion) {
 }
 
 /**
- * Reshapes a trip_sheets row into the SAME per-line shape enhanceLine()
- * already knows how to enrich for invoice PDFs, then runs it through
- * that unchanged function — a trip_sheets row already carries every
- * field enhanceLine() reads (toll_paise, parking_paise, total_km,
- * total_hours, snap_base_km, snap_base_hours, snap_extra_km_rate_paise,
- * snap_extra_hr_rate_paise, snap_slab_rate_paise, driver_batta_paise,
- * trip_date, trip_sheet_number) under IDENTICAL column names, since
- * invoiceLine.repository.js#listByInvoiceForPdf joins exactly these
- * trip_sheets columns onto each invoice_line row in the first place
- * (see that function's own comment). Only vehicle_number/vehicle_type/
- * line_number/line_amount_paise need aliasing — the trip's own
- * snapshot_vehicle_number/snapshot_vehicle_type instead of an
- * invoice_line's vehicle_number/vehicle_type, "1" since a trip is its
- * own single line, and line_amount_paise reconstructed as base+extras+
- * batta (ADR-010's "taxable revenue only" definition — EXCLUDING toll/
- * parking/permit/fasttag, which is why this is NOT simply
- * trip.subtotal_paise: for OUTSTATION, subtotal_paise already has toll/
- * parking/permit/fasttag folded in, and enhanceLine() adds toll_paise
- * back on top of line_amount_paise itself to get total_cost_paise —
- * reusing subtotal_paise here would double-count it).
+ * Reshapes ONE trip_sheet_vehicles row into the SAME per-line shape
+ * enhanceLine() already knows how to enrich for invoice PDFs, then runs
+ * it through that unchanged function — a trip_sheet_vehicles row
+ * already carries every field enhanceLine() reads (toll_paise,
+ * parking_paise, total_km, total_hours, snap_base_km, snap_base_hours,
+ * snap_extra_km_rate_paise, snap_extra_hr_rate_paise,
+ * snap_slab_rate_paise, driver_batta_paise) under IDENTICAL column
+ * names to what invoiceLine.repository.js#listByInvoiceForPdf's own
+ * JOIN already produces for a real invoice_line (Task A's own
+ * reasoning, now applied per-vehicle instead of per-trip since Task B1
+ * moved these columns off trip_sheets onto the child table). `trip_date`
+ * comes from the PARENT trip (sheet-level, unaffected by the
+ * restructure) since a vehicle row itself has no trip_date column.
+ * vehicle_number/vehicle_type/line_number/line_amount_paise are
+ * aliased/reconstructed exactly as Task A established — see that
+ * function's own original comment for the ADR-010 "taxable revenue
+ * only" reasoning on why line_amount_paise is base+extras+batta, not
+ * subtotal_paise.
+ *
+ * @param {object} vehicleRow - one trip_sheet_vehicles row
+ * @param {object} trip - the parent trip_sheets row (for trip_date/trip_sheet_number — sheet-level, not on the vehicle row)
  */
-function buildTripSheetLine(trip) {
+function buildTripSheetLine(vehicleRow, trip) {
   return enhanceLine({
-    ...trip,
-    vehicle_number: trip.snapshot_vehicle_number,
-    vehicle_type: trip.snapshot_vehicle_type,
-    line_number: 1,
-    line_amount_paise: trip.base_amount_paise + trip.extras_amount_paise + trip.driver_batta_paise,
+    ...vehicleRow,
+    trip_date: trip.trip_date,
+    // invoice-proforma-{local,outstation}.hbs's "Trip Sheet Number"
+    // column reads this per LINE (mirroring how a real multi-trip
+    // invoice's lines each carry their own trip's number via
+    // invoiceLine.repository.js#listByInvoiceForPdf's JOIN) — every
+    // vehicle on one sheet shares the SAME sheet number, so this is the
+    // same value repeated across all N lines, not a per-vehicle field.
+    // Missing this left the column blank on every row (caught via Rule
+    // 13 visual review, not the automated script).
+    trip_sheet_number: trip.trip_sheet_number,
+    vehicle_number: vehicleRow.snapshot_vehicle_number,
+    vehicle_type: vehicleRow.snapshot_vehicle_type,
+    line_number: vehicleRow.line_number,
+    line_amount_paise: vehicleRow.base_amount_paise + vehicleRow.extras_amount_paise + vehicleRow.driver_batta_paise,
   });
 }
 
-function buildTripSheetRenderContext(trip, tenant, customer) {
-  const enhancedLine = buildTripSheetLine(trip);
+/**
+ * Task B1: a trip sheet's Proforma now sums N vehicle lines (one per
+ * trip_sheet_vehicles row) instead of the single line Task A built —
+ * the templates were already `{{#each lines}}` (built for N-trips-per-
+ * invoice), so this is purely a render-context change; zero template
+ * edits.
+ *
+ * @param {object} trip - the trip_sheets row
+ * @param {object[]} vehicles - the sheet's trip_sheet_vehicles rows, ordered by line_number
+ * @param {object} tenant
+ * @param {object} customer
+ */
+function buildTripSheetRenderContext(trip, vehicles, tenant, customer) {
+  const enhancedLines = vehicles.map((v) => buildTripSheetLine(v, trip));
+
+  const tollTotalPaise = enhancedLines.reduce((sum, l) => sum + Number(l.toll_paise || 0), 0);
+  const tollParkingTotalPaise = enhancedLines.reduce((sum, l) => sum + l.toll_parking_paise, 0);
+  const totalCostTotalPaise = enhancedLines.reduce((sum, l) => sum + l.total_cost_paise, 0);
+  const tripAmountPaise = enhancedLines.reduce((sum, l) => sum + Number(l.base_amount_paise), 0);
+  const totalExtraCostPaise = enhancedLines.reduce(
+    (sum, l) => sum + (l.extra_km_amount_paise || 0) + (l.extra_hrs_amount_paise || 0),
+    0,
+  );
+  const totalDriverBattaPaise = enhancedLines.reduce((sum, l) => sum + Number(l.driver_batta_paise || 0), 0);
+  const subtotalPaise = enhancedLines.reduce((sum, l) => sum + l.line_amount_paise, 0);
 
   return {
     // shared/header.hbs reads docNumber=invoice.invoice_number and
@@ -385,31 +420,30 @@ function buildTripSheetRenderContext(trip, tenant, customer) {
     invoice: { invoice_number: trip.trip_sheet_number, invoice_date: trip.trip_date },
     tenant: buildTenantRenderContext(tenant),
     customer: buildCustomerRenderContext(customer),
-    lines: [enhancedLine],
+    lines: enhancedLines,
     billingCycle: { from: trip.trip_date, to: trip.trip_date },
     bookedBy: trip.booked_by,
-    toll_parking_total_paise: enhancedLine.toll_parking_paise,
-    toll_total_paise: Number(trip.toll_paise || 0),
-    total_cost_total_paise: enhancedLine.total_cost_paise,
-    trip_amount_paise: Number(trip.base_amount_paise),
-    total_extra_cost_paise: (enhancedLine.extra_km_amount_paise || 0) + (enhancedLine.extra_hrs_amount_paise || 0),
-    total_driver_batta_paise: Number(trip.driver_batta_paise || 0),
+    toll_parking_total_paise: tollParkingTotalPaise,
+    toll_total_paise: tollTotalPaise,
+    total_cost_total_paise: totalCostTotalPaise,
+    trip_amount_paise: tripAmountPaise,
+    total_extra_cost_paise: totalExtraCostPaise,
+    total_driver_batta_paise: totalDriverBattaPaise,
     // invoice-proforma-local.hbs's own <tfoot> reads a TOP-LEVEL
     // subtotal_paise (mirroring invoice.subtotal_paise — the sum of
-    // every line's line_amount_paise), not the per-line value already
-    // on `lines[0]` — missing this rendered the table's Total row as
-    // "0.00" (caught via Rule 13 visual review, not the smoke script,
-    // which never asserted on that specific cell). Single line here,
-    // so it's just that line's own line_amount_paise restated at the
-    // top level.
-    subtotal_paise: enhancedLine.line_amount_paise,
+    // every line's line_amount_paise), not any single line's own value
+    // — missing this rendered the table's Total row as "0.00" under
+    // Task A (caught via Rule 13 visual review, not the smoke script).
+    // Now genuinely summed across N lines, re-verified via Rule 13 for
+    // this task too (see the debrief).
+    subtotal_paise: subtotalPaise,
     // Trip sheets never carry a discount concept — explicitly zero,
     // not omitted, so the templates' `{{#if (gt discount_paise 0)}}`
     // guard resolves the same deterministic way an invoice with no
     // discount already does.
     discount_paise: 0,
-    net_payable_paise: trip.net_payable_paise,
-    amount_in_words: amountInWords(trip.net_payable_paise),
+    net_payable_paise: trip.total_net_payable_paise,
+    amount_in_words: amountInWords(trip.total_net_payable_paise),
   };
 }
 
@@ -675,10 +709,11 @@ async function generateTripSheetPdf(tenantId, tripId, db) {
       });
     }
 
+    const vehicles = await vehicleLineRepo.listBySheet(tenantId, tripId, client);
     const { tenantSnapshot, customerSnapshot } = await resolveTripSheetPdfParties(tenantId, trip, client);
     const templateVersion = trip.pdf_template_version || pdfEngine.TEMPLATE_VERSION;
     const templateName = pickTripSheetTemplateName(trip, templateVersion);
-    const context = buildTripSheetRenderContext(trip, tenantSnapshot, customerSnapshot);
+    const context = buildTripSheetRenderContext(trip, vehicles, tenantSnapshot, customerSnapshot);
 
     const pdfBuffer = await renderPdf(templateName, templateVersion, context, { tenantId, tripId });
 
