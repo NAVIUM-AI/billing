@@ -26,6 +26,34 @@
 -- invoice-foundation migration: invoice_lines.tenant_id is a plain
 -- UUID NOT NULL with no FK to tenants, RLS-policy-only, identical shape
 -- to what's used here).
+
+-- ─── Role-independence fix (post-hoc edit) ───────────
+-- This migration's own backfill (the INSERT INTO trip_sheet_vehicles
+-- ... SELECT ... FROM trip_sheets below, and the later
+-- UPDATE trip_sheets SET total_net_payable_paise = ...) reads/writes
+-- trip_sheets, and trip_sheet_vehicles itself, both under FORCE ROW
+-- LEVEL SECURITY (trip_sheets from the original trip-sheets migration;
+-- trip_sheet_vehicles from this same file, below). Run with no
+-- app.current_tenant_id set, those statements are only guaranteed to
+-- see every row if the connecting role bypasses RLS. On Neon,
+-- neondb_owner has BYPASSRLS, so the migration backfilled correctly
+-- there and Neon's data is already verified correct (266 sheets, 280
+-- vehicle rows, 0 orphans, 0 NULL totals, 0 parent/child mismatches) —
+-- this edit does not change that outcome and Neon is not being
+-- touched. For a non-bypass table-owner role (e.g. local billing_app),
+-- FORCE RLS still applies to owner-issued queries — and critically,
+-- `SET row_security = off` does NOT override FORCE RLS the way it
+-- overrides plain RLS: Postgres refuses the query outright ("query
+-- would be affected by row-level security policy") rather than risk
+-- silently hiding rows the owner is supposed to see under FORCE. The
+-- only real mechanism is the DDL-level `NO FORCE ROW LEVEL SECURITY`,
+-- toggled off immediately before the backfill statements and back on
+-- immediately after (both tables), further down this file. Because
+-- this whole migration runs in node-pg-migrate's default single
+-- transaction (confirmed: no noTransaction()/--no-transaction marker
+-- anywhere in this file or migrate:up's invocation), a failure at any
+-- point rolls back the toggle too — trip_sheets/trip_sheet_vehicles
+-- are never left un-forced in any committed state.
 CREATE TABLE trip_sheet_vehicles (
   id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id               UUID NOT NULL,
@@ -108,6 +136,14 @@ CREATE POLICY trip_sheet_vehicles_tenant_isolation
   USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid)
   WITH CHECK (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
 
+-- Briefly un-force RLS on both tables so the backfill below sees every
+-- row regardless of the connecting role's BYPASSRLS status — see the
+-- "Role-independence fix" note at the top of this file for why
+-- `SET row_security = off` can't be used here instead. Re-forced
+-- immediately after the backfill writes complete, below.
+ALTER TABLE trip_sheets NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE trip_sheet_vehicles NO FORCE ROW LEVEL SECURITY;
+
 -- ─── Backfill: every existing trip_sheets row becomes one
 -- trip_sheet_vehicles row at line_number=1, copying the 35 columns
 -- across verbatim. Guarded by NOT EXISTS so re-running this migration
@@ -164,6 +200,11 @@ ALTER TABLE trip_sheets
   ADD COLUMN total_net_payable_paise BIGINT;
 
 UPDATE trip_sheets SET total_net_payable_paise = net_payable_paise;
+
+-- Backfill writes are done — restore FORCE RLS on both tables
+-- immediately, before any further statement in this migration.
+ALTER TABLE trip_sheets FORCE ROW LEVEL SECURITY;
+ALTER TABLE trip_sheet_vehicles FORCE ROW LEVEL SECURITY;
 
 ALTER TABLE trip_sheets
   ALTER COLUMN total_net_payable_paise SET NOT NULL;
