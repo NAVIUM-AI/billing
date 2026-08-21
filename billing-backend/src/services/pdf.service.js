@@ -47,9 +47,21 @@ const pdfEngine = require("./pdfEngine.service");
 const invoiceRepo = require("../repositories/invoice.repository");
 const creditNoteRepo = require("../repositories/creditNote.repository");
 const invoiceLineRepo = require("../repositories/invoiceLine.repository");
+const tripSheetRepo = require("../repositories/tripSheet.repository");
+const customerRepo = require("../repositories/customer.repository");
+const tenantRepo = require("../repositories/tenant.repository");
 const { apiError } = require("../utils/httpError");
 const { stateNameForCode } = require("../constants/gstStateCodes");
 const logger = require("../utils/logger");
+// Trip sheets carry no frozen tenant/customer snapshot of their own
+// (that's an invoice-only concept, written once at issue — see this
+// file's own top comment) — buildTripSheetRenderContext below reuses
+// these SAME snapshot-shaping functions on a LIVE tenant/customer row
+// instead, to get the exact flat field shape shared/header.hbs and
+// shared/bill-to.hbs already expect (address_line1/city/pincode/etc.)
+// without duplicating that shaping logic.
+const { buildTenantSnapshot, buildCustomerSnapshot } = require("../utils/invoiceSnapshot");
+const { amountInWords } = require("../domain/gst/amountInWords");
 
 const VEHICLE_TYPE_LABELS = {
   SEDAN: "Sedan",
@@ -294,6 +306,113 @@ function buildInvoiceRenderContext(invoice, lines, templateName) {
   };
 }
 
+/**
+ * Trip-sheet PDFs are ALWAYS Proforma-framed, never TAX — trip_sheets
+ * has no gst_rate_snapshot/cgst_paise/sgst_paise/igst_paise columns at
+ * all (GST is only ever computed later, at invoice-creation time, from
+ * a trip's frozen subtotal), so there is no TAX-invoice path to
+ * choose here. Keyed purely on service_type (billing_mode is
+ * irrelevant to which document renders — a GST-mode trip's own PDF is
+ * still a Proforma; billing_mode only decides what KIND of invoice
+ * this trip is later eligible to be picked into). Only v1.1.0 exists
+ * since this is a brand-new PDF feature with no v1.0.0 history to stay
+ * compatible with — same reasoning as invoices' own template
+ * versioning, just with nothing to freeze against yet.
+ */
+const TRIP_TEMPLATE_MAP = {
+  "v1.1.0": {
+    LOCAL: "invoice-proforma-local",
+    OUTSTATION: "invoice-proforma-outstation",
+  },
+};
+
+function pickTripSheetTemplateName(trip, templateVersion) {
+  const versionMap = TRIP_TEMPLATE_MAP[templateVersion];
+  if (!versionMap) {
+    throw apiError(500, "PDF_TEMPLATE_ERROR", `No trip-sheet template map defined for version ${templateVersion}.`);
+  }
+  const templateFile = versionMap[trip.service_type];
+  if (!templateFile) {
+    throw apiError(500, "PDF_TEMPLATE_ERROR", `No trip-sheet template for service_type ${trip.service_type} at ${templateVersion}.`);
+  }
+  return templateFile;
+}
+
+/**
+ * Reshapes a trip_sheets row into the SAME per-line shape enhanceLine()
+ * already knows how to enrich for invoice PDFs, then runs it through
+ * that unchanged function — a trip_sheets row already carries every
+ * field enhanceLine() reads (toll_paise, parking_paise, total_km,
+ * total_hours, snap_base_km, snap_base_hours, snap_extra_km_rate_paise,
+ * snap_extra_hr_rate_paise, snap_slab_rate_paise, driver_batta_paise,
+ * trip_date, trip_sheet_number) under IDENTICAL column names, since
+ * invoiceLine.repository.js#listByInvoiceForPdf joins exactly these
+ * trip_sheets columns onto each invoice_line row in the first place
+ * (see that function's own comment). Only vehicle_number/vehicle_type/
+ * line_number/line_amount_paise need aliasing — the trip's own
+ * snapshot_vehicle_number/snapshot_vehicle_type instead of an
+ * invoice_line's vehicle_number/vehicle_type, "1" since a trip is its
+ * own single line, and line_amount_paise reconstructed as base+extras+
+ * batta (ADR-010's "taxable revenue only" definition — EXCLUDING toll/
+ * parking/permit/fasttag, which is why this is NOT simply
+ * trip.subtotal_paise: for OUTSTATION, subtotal_paise already has toll/
+ * parking/permit/fasttag folded in, and enhanceLine() adds toll_paise
+ * back on top of line_amount_paise itself to get total_cost_paise —
+ * reusing subtotal_paise here would double-count it).
+ */
+function buildTripSheetLine(trip) {
+  return enhanceLine({
+    ...trip,
+    vehicle_number: trip.snapshot_vehicle_number,
+    vehicle_type: trip.snapshot_vehicle_type,
+    line_number: 1,
+    line_amount_paise: trip.base_amount_paise + trip.extras_amount_paise + trip.driver_batta_paise,
+  });
+}
+
+function buildTripSheetRenderContext(trip, tenant, customer) {
+  const enhancedLine = buildTripSheetLine(trip);
+
+  return {
+    // shared/header.hbs reads docNumber=invoice.invoice_number and
+    // docDate=invoice.invoice_date via the proforma templates' own
+    // partial invocation — that hash-argument wiring lives INSIDE
+    // invoice-proforma-{local,outstation}.hbs, unchanged, so this
+    // context aliases a trip sheet into the same `invoice`-shaped key
+    // rather than touching the templates. Not a real invoice; purely
+    // satisfying the shared partial's expected context shape (Rule 10
+    // — adapt to the real template contract, not invent a new one).
+    invoice: { invoice_number: trip.trip_sheet_number, invoice_date: trip.trip_date },
+    tenant: buildTenantRenderContext(tenant),
+    customer: buildCustomerRenderContext(customer),
+    lines: [enhancedLine],
+    billingCycle: { from: trip.trip_date, to: trip.trip_date },
+    bookedBy: trip.booked_by,
+    toll_parking_total_paise: enhancedLine.toll_parking_paise,
+    toll_total_paise: Number(trip.toll_paise || 0),
+    total_cost_total_paise: enhancedLine.total_cost_paise,
+    trip_amount_paise: Number(trip.base_amount_paise),
+    total_extra_cost_paise: (enhancedLine.extra_km_amount_paise || 0) + (enhancedLine.extra_hrs_amount_paise || 0),
+    total_driver_batta_paise: Number(trip.driver_batta_paise || 0),
+    // invoice-proforma-local.hbs's own <tfoot> reads a TOP-LEVEL
+    // subtotal_paise (mirroring invoice.subtotal_paise — the sum of
+    // every line's line_amount_paise), not the per-line value already
+    // on `lines[0]` — missing this rendered the table's Total row as
+    // "0.00" (caught via Rule 13 visual review, not the smoke script,
+    // which never asserted on that specific cell). Single line here,
+    // so it's just that line's own line_amount_paise restated at the
+    // top level.
+    subtotal_paise: enhancedLine.line_amount_paise,
+    // Trip sheets never carry a discount concept — explicitly zero,
+    // not omitted, so the templates' `{{#if (gt discount_paise 0)}}`
+    // guard resolves the same deterministic way an invoice with no
+    // discount already does.
+    discount_paise: 0,
+    net_payable_paise: trip.net_payable_paise,
+    amount_in_words: amountInWords(trip.net_payable_paise),
+  };
+}
+
 function buildCreditNoteRenderContext(creditNote, originalInvoice) {
   const customer = buildCustomerRenderContext(creditNote.customer_snapshot);
   return {
@@ -488,6 +607,102 @@ async function generateCreditNotePdf(tenantId, creditNoteId, db) {
 }
 
 /**
+ * Resolves the tenant/customer render blocks a trip sheet needs for
+ * its PDF. Unlike invoices, a trip has no frozen snapshot to read —
+ * this does a LIVE lookup instead (display data, not pricing; see this
+ * file's top-of-imports comment). Three customer states:
+ *   - trip.customer_id set: fetch the real row, run it through
+ *     buildCustomerSnapshot for full address/phone/email/credit_days.
+ *   - trip.customer_id null but a name was captured
+ *     (snapshot_customer_name, set from manual_customer_name at
+ *     create-time — see tripSheet.service.js): a minimal
+ *     snapshot-shaped object with just a name, no address/GSTIN/etc.
+ *     to fabricate.
+ *   - neither: a clearly-labeled placeholder rather than a blank
+ *     "Bill To" block, which would look like a rendering bug rather
+ *     than a deliberate "no customer" trip on visual review (Rule 13).
+ *
+ * @param {string} tenantId
+ * @param {object} trip - a trip_sheets row (findById's `SELECT *`)
+ * @param {import('pg').PoolClient} client
+ * @returns {Promise<{ tenantSnapshot: object, customerSnapshot: object }>}
+ */
+async function resolveTripSheetPdfParties(tenantId, trip, client) {
+  const tenant = await tenantRepo.findById(tenantId, client);
+  const tenantSnapshot = buildTenantSnapshot(tenant);
+
+  let customerSnapshot;
+  if (trip.customer_id) {
+    const customer = await customerRepo.findById(tenantId, trip.customer_id, client);
+    customerSnapshot = customer ? buildCustomerSnapshot(customer) : { name: trip.snapshot_customer_name };
+  } else if (trip.snapshot_customer_name) {
+    customerSnapshot = { name: trip.snapshot_customer_name };
+  } else {
+    customerSnapshot = { name: "No customer specified" };
+  }
+
+  return { tenantSnapshot, customerSnapshot };
+}
+
+/**
+ * Generates (or regenerates) the Proforma PDF for a trip sheet.
+ * Mirrors generateInvoicePdf's structure exactly (storage path shape,
+ * pdf tracking column UPDATE, idempotent overwrite) — see that
+ * function's own doc comment. Deliberately does NOT touch the pricing
+ * calculator: every number rendered comes straight off the trip's own
+ * already-frozen columns (base_amount_paise, extras_amount_paise,
+ * driver_batta_paise, subtotal_paise, gross_paise, net_payable_paise,
+ * breakdown) via buildTripSheetRenderContext, never recomputed.
+ *
+ * @param {string} tenantId
+ * @param {string} tripId
+ * @param {object} db - req.db
+ * @returns {Promise<object>}
+ */
+async function generateTripSheetPdf(tenantId, tripId, db) {
+  return db.withTenantContext(async (client) => {
+    const trip = await tripSheetRepo.findById(tenantId, tripId, client);
+    if (!trip) {
+      throw apiError(404, "TRIP_NOT_FOUND", "Trip sheet not found.");
+    }
+    // Mirrors generateInvoicePdf's INVOICE_NOT_ISSUED guard — DRAFT is
+    // the only status blocked, same "once past DRAFT, PDF is always
+    // legal" permanence invoices already have (FINALIZED, INVOICED,
+    // and CANCELLED trips can all still render their Proforma).
+    if (trip.status === "DRAFT") {
+      throw apiError(400, "TRIP_NOT_FINALIZED", "PDFs can only be generated for finalized trip sheets.", {
+        current_status: trip.status,
+      });
+    }
+
+    const { tenantSnapshot, customerSnapshot } = await resolveTripSheetPdfParties(tenantId, trip, client);
+    const templateVersion = trip.pdf_template_version || pdfEngine.TEMPLATE_VERSION;
+    const templateName = pickTripSheetTemplateName(trip, templateVersion);
+    const context = buildTripSheetRenderContext(trip, tenantSnapshot, customerSnapshot);
+
+    const pdfBuffer = await renderPdf(templateName, templateVersion, context, { tenantId, tripId });
+
+    const fileName = `${tripId}-${templateVersion}.pdf`;
+    await writePdfFile(path.join(tenantId, "trip-sheets"), fileName, pdfBuffer);
+    const relativeUrl = `/pdf-storage/${tenantId}/trip-sheets/${fileName}`;
+
+    await client.query(
+      `UPDATE trip_sheets
+       SET pdf_url = $1, pdf_generated_at = NOW(), pdf_template_version = $2, pdf_file_size_bytes = $3
+       WHERE id = $4::uuid AND tenant_id = $5::uuid`,
+      [relativeUrl, templateVersion, pdfBuffer.length, tripId, tenantId],
+    );
+
+    return {
+      pdf_url: relativeUrl,
+      pdf_template_version: templateVersion,
+      pdf_file_size_bytes: pdfBuffer.length,
+      pdf_generated_at: new Date().toISOString(),
+    };
+  });
+}
+
+/**
  * @param {string} relativeUrl - e.g. "/pdf-storage/{tenantId}/invoices/{file}"
  * @returns {string} absolute filesystem path under env.pdfStorageRoot
  */
@@ -537,9 +752,32 @@ async function getCreditNotePdfBuffer(tenantId, creditNoteId, db) {
   });
 }
 
+/**
+ * @param {string} tenantId
+ * @param {string} tripId
+ * @param {object} db - req.db
+ * @returns {Promise<{ buffer: Buffer, filename: string }>}
+ */
+async function getTripSheetPdfBuffer(tenantId, tripId, db) {
+  return db.withTenantContext(async (client) => {
+    const trip = await tripSheetRepo.findById(tenantId, tripId, client);
+    if (!trip || !trip.pdf_url) {
+      throw apiError(404, "PDF_NOT_GENERATED", "PDF has not been generated for this trip sheet yet.");
+    }
+    try {
+      const buffer = await fs.readFile(resolveStoredPath(trip.pdf_url));
+      return { buffer, filename: `${trip.trip_sheet_number.replace(/\//g, "-")}.pdf` };
+    } catch (err) {
+      throw apiError(500, "PDF_FILE_MISSING", "PDF file is registered but missing from storage.");
+    }
+  });
+}
+
 module.exports = {
   generateInvoicePdf,
   generateCreditNotePdf,
+  generateTripSheetPdf,
   getInvoicePdfBuffer,
   getCreditNotePdfBuffer,
+  getTripSheetPdfBuffer,
 };

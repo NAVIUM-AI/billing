@@ -40,7 +40,11 @@ export interface TripSheet {
   service_type: TripServiceType;
   billing_mode: TripBillingMode;
   status: TripStatus;
-  customer_id: string;
+  // Nullable as of the trip-sheets-proforma-pdf migration — a trip may
+  // have a real customer, a free-text manual_customer_name, or
+  // neither ("no customer specified").
+  customer_id: string | null;
+  manual_customer_name: string | null;
   // Nullable for MANUAL-mode trips (trip-sheets-manual-mode migration
   // dropped the NOT NULL constraint) — always non-null for FLEET.
   vehicle_id: string | null;
@@ -50,7 +54,9 @@ export interface TripSheet {
 
   snapshot_vehicle_number: string;
   snapshot_vehicle_type: VehicleType;
-  snapshot_customer_name: string;
+  // Nullable in step with customer_id above — null only when the trip
+  // genuinely has no customer at all (not even a free-text name).
+  snapshot_customer_name: string | null;
   snapshot_customer_gstin: string | null;
 
   snap_base_hours: number | null;
@@ -91,6 +97,13 @@ export interface TripSheet {
   pax_note: string | null;
   remarks: string | null;
 
+  // Proforma PDF tracking — mirrors invoices'/credit_notes' own set
+  // exactly (trip-sheets-proforma-pdf migration).
+  pdf_url: string | null;
+  pdf_generated_at: string | null;
+  pdf_template_version: string | null;
+  pdf_file_size_bytes: number | null;
+
   created_by: string | null;
   created_at: string;
   updated_at: string;
@@ -116,13 +129,13 @@ export interface TripSheetListRow {
   service_type: TripServiceType;
   billing_mode: TripBillingMode;
   status: TripStatus;
-  customer_id: string;
+  customer_id: string | null;
   vehicle_id: string | null;
   driver_id: string | null;
   pricing_source: PricingSource;
   snapshot_vehicle_number: string;
   snapshot_vehicle_type: VehicleType;
-  snapshot_customer_name: string;
+  snapshot_customer_name: string | null;
   snapshot_customer_gstin: string | null;
   trip_date: string;
   total_km: number;

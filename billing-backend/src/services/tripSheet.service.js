@@ -247,10 +247,35 @@ async function createTripSheet(tenantId, input, actorUserId, db) {
 
   // Steps 4 + 5: Check (DB state) + Write, as one transaction.
   return db.withTenantContext(async (client) => {
-    // (a) Customer.
-    const customer = await custRepo.findById(tenantId, input.customer_id, client);
-    if (!customer || !customer.is_active) {
-      throw apiError(404, "CUSTOMER_NOT_FOUND", "Customer not found.");
+    // (a) Customer — optional as of the trip-sheets-proforma-pdf
+    // migration. Three states: a real customer_id (existing path,
+    // unchanged below), a free-text manual_customer_name (no lookup,
+    // no GSTIN — there's no real customer record behind it), or
+    // neither (both snapshot fields stay null). The validator's own
+    // cross-field .custom() already resolved the "both sent" case by
+    // dropping manual_customer_name in favor of customer_id, so at
+    // most one of these two inputs is ever present here.
+    let customerId = null;
+    let snapshotCustomerName = null;
+    let snapshotCustomerGstin = null;
+    // Distinct from snapshotCustomerName (which the free-text case
+    // ALSO populates, same "manual input mirrors into the snapshot
+    // column" pattern manual_vehicle_number/type already established)
+    // — this one is persisted into its own manual_customer_name column
+    // so a free-text trip stays distinguishable from a real customer
+    // whose captured name happens to match, purely for audit purposes.
+    let manualCustomerName = null;
+    if (input.customer_id) {
+      const customer = await custRepo.findById(tenantId, input.customer_id, client);
+      if (!customer || !customer.is_active) {
+        throw apiError(404, "CUSTOMER_NOT_FOUND", "Customer not found.");
+      }
+      customerId = customer.id;
+      snapshotCustomerName = customer.company_name || customer.name;
+      snapshotCustomerGstin = customer.gstin;
+    } else if (input.manual_customer_name) {
+      snapshotCustomerName = input.manual_customer_name;
+      manualCustomerName = input.manual_customer_name;
     }
 
     // (c) Driver, if provided. Inactive drivers are allowed — a trip
@@ -364,15 +389,16 @@ async function createTripSheet(tenantId, input, actorUserId, db) {
         tripSheetNumber,
         serviceType,
         billingMode,
-        customerId: customer.id,
+        customerId,
+        manualCustomerName,
         vehicleId,
         driverId,
         pricingRuleId,
         pricingSource: isManual ? "MANUAL" : "FLEET",
         snapshotVehicleNumber,
         snapshotVehicleType,
-        snapshotCustomerName: customer.company_name || customer.name,
-        snapshotCustomerGstin: customer.gstin,
+        snapshotCustomerName,
+        snapshotCustomerGstin,
         snap,
         tripDate: input.trip_date,
         startDatetime: input.start_datetime,

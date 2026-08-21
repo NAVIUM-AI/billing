@@ -65,6 +65,33 @@ export function useCancelTripSheet() {
   });
 }
 
+// Composed action behind the detail page's single "Download PDF"
+// button — generate (or regenerate, idempotent) then immediately
+// download, so the UI never exposes the two-endpoint nature
+// underneath. Mirrors invoices.hooks.ts's useIssueAndGeneratePdf +
+// useDownloadInvoicePdf pairing, collapsed into one hook since a trip
+// sheet PDF has no separate "issue" step to compose against.
+export function useDownloadTripSheetPdf() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: string) => {
+      await tripSheetsApi.generateTripSheetPdf(id);
+      return tripSheetsApi.downloadTripSheetPdf(id);
+    },
+    onSuccess: ({ blob, filename }, id) => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      queryClient.invalidateQueries({ queryKey: queryKeys.tripSheets.detail(id) });
+    },
+  });
+}
+
 // Imperative (called from a button click), not a query — CSV export is
 // an action, not data the UI renders directly.
 export function useExportTripSheetsCsv() {

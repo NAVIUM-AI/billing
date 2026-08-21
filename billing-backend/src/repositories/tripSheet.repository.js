@@ -73,6 +73,7 @@ async function insert(
     serviceType,
     billingMode,
     customerId,
+    manualCustomerName,
     vehicleId,
     driverId,
     pricingRuleId,
@@ -113,7 +114,7 @@ async function insert(
     const result = await client.query(
       `INSERT INTO trip_sheets (
          tenant_id, trip_sheet_number, service_type, billing_mode,
-         customer_id, vehicle_id, driver_id, pricing_rule_id,
+         customer_id, manual_customer_name, vehicle_id, driver_id, pricing_rule_id,
          snapshot_vehicle_number, snapshot_vehicle_type,
          snapshot_customer_name, snapshot_customer_gstin,
          snap_base_hours, snap_base_km, snap_base_price_paise,
@@ -131,21 +132,21 @@ async function insert(
        )
        VALUES (
          $1, $2, $3::trip_service_type_enum, $4::trip_billing_mode_enum,
-         $5, $6, $7, $8,
-         $9, $10::vehicle_type_enum,
-         $11, $12,
-         $13, $14, $15,
-         $16, $17,
-         $18, $19,
-         $20, $21,
-         $22,
-         $23::date, $24, $25,
-         $26, $27, $28, $29, $30,
-         $31, $32, $33, $34, $35,
-         $36, $37, $38,
-         $39, $40, $41,
-         $42, $43, $44, $45, $46,
-         $47
+         $5, $6, $7, $8, $9,
+         $10, $11::vehicle_type_enum,
+         $12, $13,
+         $14, $15, $16,
+         $17, $18,
+         $19, $20,
+         $21, $22,
+         $23,
+         $24::date, $25, $26,
+         $27, $28, $29, $30, $31,
+         $32, $33, $34, $35, $36,
+         $37, $38, $39,
+         $40, $41, $42,
+         $43, $44, $45, $46, $47,
+         $48
        )
        RETURNING *`,
       [
@@ -154,6 +155,7 @@ async function insert(
         serviceType,
         billingMode,
         customerId,
+        manualCustomerName || null,
         vehicleId,
         driverId || null,
         pricingRuleId || null,
