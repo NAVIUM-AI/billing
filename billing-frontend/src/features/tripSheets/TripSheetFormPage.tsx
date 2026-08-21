@@ -35,6 +35,7 @@ const EMPTY_VALUES: TripSheetFormValues = {
   service_type: "LOCAL",
   billing_mode: "GST",
   customer_id: "",
+  manual_customer_name: "",
   manual_vehicle_number: "",
   manual_vehicle_type: "SEDAN",
   driver_id: "",
@@ -51,8 +52,6 @@ const EMPTY_VALUES: TripSheetFormValues = {
   trip_date: today(),
   start_datetime: "",
   end_datetime: "",
-  opening_km: "",
-  closing_km: "",
   total_km: "",
   total_hours: "",
   total_days: "1",
@@ -91,7 +90,8 @@ function tripToFormValues(trip: TripSheet): TripSheetFormValues {
   return {
     service_type: trip.service_type,
     billing_mode: trip.billing_mode,
-    customer_id: trip.customer_id,
+    customer_id: trip.customer_id ?? "",
+    manual_customer_name: trip.manual_customer_name ?? "",
     // Vehicle/rate fields are immutable post-create (not in
     // updateTripSheetSchema at all — same as fleet mode's vehicle_id/
     // pricing_rule_id) — prefilled here purely for display on the edit
@@ -115,8 +115,6 @@ function tripToFormValues(trip: TripSheet): TripSheetFormValues {
     trip_date: trip.trip_date,
     start_datetime: trip.start_datetime ? trip.start_datetime.slice(0, 16) : "",
     end_datetime: trip.end_datetime ? trip.end_datetime.slice(0, 16) : "",
-    opening_km: trip.opening_km != null ? String(trip.opening_km) : "",
-    closing_km: trip.closing_km != null ? String(trip.closing_km) : "",
     total_km: String(trip.total_km),
     total_hours: String(trip.total_hours),
     total_days: String(trip.total_days),
@@ -359,26 +357,44 @@ export function TripSheetFormPage() {
                 </div>
 
                 <div>
-                  <Label htmlFor="customer_id">Customer</Label>
+                  <Label htmlFor="customer_id">Customer (optional)</Label>
                   <select
                     id="customer_id"
+                    disabled={isEdit}
                     {...register("customer_id")}
-                    className="mt-1.5 flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    className="mt-1.5 flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
                   >
-                    <option value="">Select customer</option>
+                    <option value="">No saved customer</option>
                     {customersData?.customers.map((c) => (
                       <option key={c.id} value={c.id}>
                         {c.customer_type === "B2B" ? c.company_name : c.name}
                       </option>
                     ))}
                   </select>
-                  <button
-                    type="button"
-                    onClick={() => setCustomerDrawerOpen(true)}
-                    className="mt-1 text-xs font-medium text-primary-600 hover:text-primary-700"
-                  >
-                    + Quick create a new customer
-                  </button>
+                  {!isEdit && (
+                    <button
+                      type="button"
+                      onClick={() => setCustomerDrawerOpen(true)}
+                      className="mt-1 text-xs font-medium text-primary-600 hover:text-primary-700"
+                    >
+                      + Quick create a new customer
+                    </button>
+                  )}
+                </div>
+                <div>
+                  <FormField name="manual_customer_name" label="Or type a customer name (optional)">
+                    <Input
+                      id="manual_customer_name"
+                      placeholder="e.g. a walk-in or one-off customer"
+                      disabled={isEdit || Boolean(watch("customer_id"))}
+                      {...register("manual_customer_name")}
+                    />
+                  </FormField>
+                  {Boolean(watch("customer_id")) && (
+                    <p className="mt-1 text-xs text-gray-500">
+                      A saved customer is selected above — clear it to type a name instead.
+                    </p>
+                  )}
                 </div>
 
                 <FormField name="remarks" label="Notes (optional)">
@@ -505,14 +521,6 @@ export function TripSheetFormPage() {
             <div className="rounded-lg border bg-white p-4">
               <h2 className="mb-3 text-sm font-semibold text-gray-700">Trip Usage</h2>
               <div className="grid grid-cols-2 gap-3">
-                <FormField name="opening_km" label="Opening KM (optional)">
-                  <Input id="opening_km" type="number" {...register("opening_km")} />
-                </FormField>
-                <FormField name="closing_km" label="Closing KM (optional)">
-                  <Input id="closing_km" type="number" {...register("closing_km")} />
-                </FormField>
-              </div>
-              <div className="mt-3 grid grid-cols-2 gap-3">
                 <FormField name="total_km" label={billingMode === "PERFORMANCE" ? "Running KM" : "Total KM"}>
                   <Input id="total_km" type="number" {...register("total_km")} />
                 </FormField>

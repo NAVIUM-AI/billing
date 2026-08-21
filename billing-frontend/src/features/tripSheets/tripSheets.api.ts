@@ -28,8 +28,6 @@ import {
 import type { TripSheet, TripSheetFilters, TripSheetListResponse, TripSheetListRow } from "@/types/tripSheet";
 
 const NUMERIC_KEYS = [
-  "opening_km",
-  "closing_km",
   "total_km",
   "total_hours",
   "total_days",
@@ -100,12 +98,22 @@ function toBasePayload(values: TripSheetFormValues) {
 }
 
 function toCreatePayload(values: TripSheetFormValues) {
-  return toBasePayload(values);
+  const payload = toBasePayload(values);
+  // Mirrors tripSheet.validator.js's own cross-field precedence ("if
+  // both are sent, prefer customer_id") client-side: the
+  // manual_customer_name INPUT is disabled once a dropdown customer is
+  // selected (see TripSheetFormPage.tsx), but its stale text can still
+  // be sitting in form state from before that selection — stripped
+  // here so a leftover typed name never overrides (or redundantly
+  // rides along with) a real customer_id on submit.
+  if (payload.customer_id) delete payload.manual_customer_name;
+  return payload;
 }
 
 const MANUAL_MODE_CREATE_ONLY_KEYS = [
   "manual_vehicle_number",
   "manual_vehicle_type",
+  "manual_customer_name",
   "base_price_rupees",
   "base_hours",
   "base_km",
@@ -182,6 +190,21 @@ export async function finalizeTripSheet(id: string): Promise<TripSheet> {
 export async function cancelTripSheet(id: string, reason: string): Promise<TripSheet> {
   const res = await apiClient.post(`/trips/${id}/cancel`, { reason });
   return tripSheetDetailResponseSchema.parse(res.data).trip as TripSheet;
+}
+
+// Mirrors invoices.api.ts's generateInvoicePdf/downloadInvoicePdf pair
+// exactly — same two-step shape (a POST that generates/regenerates,
+// then a separate blob GET), same idempotent-overwrite semantics.
+export async function generateTripSheetPdf(id: string): Promise<{ pdf_url: string }> {
+  const res = await apiClient.post(`/trips/${id}/pdf`);
+  return res.data;
+}
+
+export async function downloadTripSheetPdf(id: string): Promise<{ blob: Blob; filename: string }> {
+  const res = await apiClient.get(`/trips/${id}/pdf`, { responseType: "blob" });
+  const disposition = (res.headers["content-disposition"] as string | undefined) || "";
+  const match = /filename="?([^"]+)"?/.exec(disposition);
+  return { blob: res.data as Blob, filename: match?.[1] || `trip-sheet-${id}.pdf` };
 }
 
 function csvEscape(value: unknown): string {

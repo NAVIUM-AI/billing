@@ -126,7 +126,13 @@ const createTripSheetSchema = Joi.object({
     .valid(...BILLING_MODES)
     .required(),
 
-  customer_id: Joi.string().guid({ version: "uuidv4" }).required(),
+  // Optional as of the trip-sheets-proforma-pdf migration — a trip may
+  // have a real customer_id, a free-text manual_customer_name, or
+  // neither ("no customer specified"). Never required at the Joi
+  // level; the cross-field .custom() below only rejects the case where
+  // BOTH are sent at once (ambiguous which one should win).
+  customer_id: Joi.string().guid({ version: "uuidv4" }).allow(null),
+  manual_customer_name: Joi.string().trim().max(255).allow("", null),
   // Required in fleet mode, absent in manual mode — enforced by the
   // cross-field .custom() below, not .required() here (Joi field-level
   // .required() can't express "required unless these OTHER fields are
@@ -204,6 +210,22 @@ const createTripSheetSchema = Joi.object({
   // .custom() rather than any single field's own rule — same reasoning
   // as this file's existing date-range/toll-conflict .custom() checks.
   .custom((value, helpers) => {
+    // Customer: unlike vehicle, NEITHER customer_id nor
+    // manual_customer_name is required — "a customer_id, a free-text
+    // name, or neither" is a legitimate three-way choice (task's own
+    // "optional... or none at all"), so there's no missing/incomplete
+    // case to reject here at all. If both happen to be sent on the
+    // same request (e.g. a dropdown selection left alongside stale
+    // free-text input), customer_id silently wins and
+    // manual_customer_name is dropped — task's own explicit
+    // instruction ("If both are sent, prefer customer_id"), not a
+    // validation error like the vehicle discriminator below. Applied
+    // here (mutating `value`) rather than in the service, since Joi's
+    // .custom() return value IS what the service receives as `input`.
+    if (value.customer_id != null && value.manual_customer_name) {
+      delete value.manual_customer_name;
+    }
+
     const hasVehicleId = value.vehicle_id !== undefined;
     const hasManual = value.manual_vehicle_number !== undefined || value.manual_vehicle_type !== undefined;
 

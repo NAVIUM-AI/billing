@@ -34,6 +34,7 @@ const {
 } = require("../../validators/tripSheet.validator");
 const tripSheetService = require("../../services/tripSheet.service");
 const perfSheet = require("../../services/performanceSheet.service");
+const pdfService = require("../../services/pdf.service");
 
 const router = express.Router();
 
@@ -118,6 +119,36 @@ router.patch(
       req.db,
     );
     res.json({ trip });
+  },
+);
+
+// Permission mirrors invoices.routes.js's own PDF pair — invoices:read,
+// not invoices:draft/write — since generating/downloading a PDF is a
+// read-adjacent action on already-committed data, not a mutation of
+// the trip itself. trips:read here for the same reason (no trips:write
+// needed to view/regenerate a document).
+router.post(
+  "/:tripId/pdf",
+  requirePermission("trips:read"),
+  validate(tripIdParamSchema, "params"),
+  async (req, res) => {
+    const result = await pdfService.generateTripSheetPdf(req.tenantId, req.params.tripId, req.db);
+    res.json(result);
+  },
+);
+
+router.get(
+  "/:tripId/pdf",
+  requirePermission("trips:read"),
+  validate(tripIdParamSchema, "params"),
+  async (req, res) => {
+    const { buffer, filename } = await pdfService.getTripSheetPdfBuffer(req.tenantId, req.params.tripId, req.db);
+    res.set({
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `attachment; filename="${filename}"`,
+      "Content-Length": buffer.length,
+    });
+    res.send(buffer);
   },
 );
 

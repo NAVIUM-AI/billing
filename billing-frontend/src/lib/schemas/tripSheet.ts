@@ -57,7 +57,13 @@ export const tripSheetFormSchema = z
     service_type: z.enum(TRIP_SERVICE_TYPES),
     billing_mode: z.enum(TRIP_BILLING_MODES),
 
-    customer_id: z.string().min(1, "Customer is required"),
+    // Optional as of the trip-sheets-proforma-pdf task — a trip may
+    // have a real customer_id (picked from the dropdown), a free-text
+    // manual_customer_name, or neither. Never required; if both are
+    // somehow present, the backend prefers customer_id (see
+    // tripSheet.validator.js's own cross-field .custom()).
+    customer_id: z.string().optional().or(z.literal("")),
+    manual_customer_name: z.string().max(255).optional().or(z.literal("")),
 
     // Manual mode only (trip-sheets-manual-mode) — this form no longer
     // offers a registered-fleet vehicle picker at all (see
@@ -91,8 +97,13 @@ export const tripSheetFormSchema = z
     start_datetime: z.string().optional().or(z.literal("")),
     end_datetime: z.string().optional().or(z.literal("")),
 
-    opening_km: numericStringField(0, "Opening KM"),
-    closing_km: numericStringField(0, "Closing KM"),
+    // opening_km/closing_km deliberately absent — this task removes
+    // those inputs from the form entirely. Confirmed via Rule 14 (read
+    // tripSheet.service.js#createTripSheet) that total_km is an
+    // independently-required field, never derived from these two, so
+    // dropping the inputs has no computation impact — the backend's
+    // own Joi schema still accepts them as optional if any other
+    // future caller sends them, this form just never will.
     total_km: numericStringField(0, "Total KM", { required: true }),
     total_hours: numericStringField(0, "Total hours", { required: true }),
     total_days: numericStringField(1, "Total days", { required: true }),
@@ -120,13 +131,6 @@ export const tripSheetFormSchema = z
       }
     }
 
-    if (data.opening_km && data.closing_km && Number(data.closing_km) < Number(data.opening_km)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["closing_km"],
-        message: "closing_km must be >= opening_km",
-      });
-    }
     // Mirrors tripSheet.service.js's TOLL_INPUT_CONFLICT check
     // (OUTSTATION only — see that function's own comment on why LOCAL/
     // PERFORMANCE aren't included).
@@ -169,7 +173,8 @@ export const tripSheetResponseSchema = z.object({
   service_type: z.enum(TRIP_SERVICE_TYPES),
   billing_mode: z.enum(TRIP_BILLING_MODES),
   status: z.enum(TRIP_STATUSES),
-  customer_id: z.string().uuid(),
+  customer_id: z.string().uuid().nullable(),
+  manual_customer_name: z.string().nullable(),
   vehicle_id: z.string().uuid().nullable(),
   driver_id: z.string().uuid().nullable(),
   pricing_rule_id: z.string().uuid().nullable(),
@@ -177,7 +182,7 @@ export const tripSheetResponseSchema = z.object({
 
   snapshot_vehicle_number: z.string(),
   snapshot_vehicle_type: z.enum(VEHICLE_TYPES),
-  snapshot_customer_name: z.string(),
+  snapshot_customer_name: z.string().nullable(),
   snapshot_customer_gstin: z.string().nullable(),
 
   snap_base_hours: z.number().nullable(),
@@ -218,6 +223,11 @@ export const tripSheetResponseSchema = z.object({
   pax_note: z.string().nullable(),
   remarks: z.string().nullable(),
 
+  pdf_url: z.string().nullable(),
+  pdf_generated_at: z.string().nullable(),
+  pdf_template_version: z.string().nullable(),
+  pdf_file_size_bytes: z.number().nullable(),
+
   created_by: z.string().nullable(),
   created_at: z.string(),
   updated_at: z.string(),
@@ -241,13 +251,13 @@ const tripSheetListRowSchema = z.object({
   service_type: z.enum(TRIP_SERVICE_TYPES),
   billing_mode: z.enum(TRIP_BILLING_MODES),
   status: z.enum(TRIP_STATUSES),
-  customer_id: z.string().uuid(),
+  customer_id: z.string().uuid().nullable(),
   vehicle_id: z.string().uuid().nullable(),
   driver_id: z.string().uuid().nullable(),
   pricing_source: z.enum(["FLEET", "MANUAL"]),
   snapshot_vehicle_number: z.string(),
   snapshot_vehicle_type: z.enum(VEHICLE_TYPES),
-  snapshot_customer_name: z.string(),
+  snapshot_customer_name: z.string().nullable(),
   snapshot_customer_gstin: z.string().nullable(),
   trip_date: z.string(),
   total_km: z.number(),

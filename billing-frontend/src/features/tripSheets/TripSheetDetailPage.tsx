@@ -8,7 +8,12 @@ import { Modal } from "@/components/Modal";
 import { PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
 import { useDriver } from "@/features/drivers/drivers.hooks";
-import { useCancelTripSheet, useFinalizeTripSheet, useTripSheet } from "@/features/tripSheets/tripSheets.hooks";
+import {
+  useCancelTripSheet,
+  useDownloadTripSheetPdf,
+  useFinalizeTripSheet,
+  useTripSheet,
+} from "@/features/tripSheets/tripSheets.hooks";
 import {
   TRIP_BILLING_MODE_LABELS,
   TRIP_SERVICE_TYPE_LABELS,
@@ -92,6 +97,7 @@ export function TripSheetDetailPage() {
   const { data: driver } = useDriver(trip?.driver_id ?? undefined);
   const finalizeTrip = useFinalizeTripSheet();
   const cancelTrip = useCancelTripSheet();
+  const downloadPdf = useDownloadTripSheetPdf();
 
   const [finalizeOpen, setFinalizeOpen] = useState(false);
   const [cancelOpen, setCancelOpen] = useState(false);
@@ -122,10 +128,23 @@ export function TripSheetDetailPage() {
     }
   }
 
+  async function handleDownloadPdf() {
+    try {
+      await downloadPdf.mutateAsync(trip!.id);
+    } catch (err) {
+      const apiErr = err instanceof AxiosError ? (err.response?.data as ApiErrorResponse | undefined)?.error : undefined;
+      toast.error(apiErr?.message || "Failed to generate PDF");
+    }
+  }
+
   const canEdit = trip.status === "DRAFT";
   const canFinalize = trip.status === "DRAFT";
   const canCancel = trip.status === "DRAFT" || trip.status === "FINALIZED";
   const cancelBlocked = trip.status === "INVOICED";
+  // Mirrors pdf.service.js#generateTripSheetPdf's own gate — DRAFT is
+  // the only status blocked, same "once past DRAFT, PDF is always
+  // legal" permanence invoices already have.
+  const canDownloadPdf = trip.status !== "DRAFT";
 
   return (
     <div className="mx-auto max-w-4xl">
@@ -145,6 +164,11 @@ export function TripSheetDetailPage() {
             >
               {TRIP_STATUS_LABELS[trip.status]}
             </span>
+            {canDownloadPdf && (
+              <Button variant="secondary" onClick={handleDownloadPdf} disabled={downloadPdf.isPending}>
+                {downloadPdf.isPending ? "Generating..." : "Download PDF"}
+              </Button>
+            )}
             {canEdit && (
               <Button variant="secondary" onClick={() => navigate(`/trips/${trip.id}/edit`)}>
                 Edit
