@@ -24,12 +24,99 @@ import { formatPaiseAsRupees } from "@/lib/money";
 import { deriveRuleType } from "@/lib/tripPricingCalc";
 import { cn } from "@/lib/utils";
 import type { ApiErrorResponse } from "@/types/api";
+import type { TripBillingMode, TripServiceType } from "@/lib/constants/enums";
+import type { TripSheetVehicle } from "@/types/tripSheet";
 
 function DetailRow({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div>
       <div className="text-xs font-medium uppercase tracking-wide text-gray-400">{label}</div>
       <div className="text-sm text-gray-900">{value ?? "—"}</div>
+    </div>
+  );
+}
+
+// Task B1: one of these per vehicle on the sheet — everything that used
+// to be the "Rate Details"/"Usage"/"Billing Breakdown" cards for the
+// (single) trip is now per-vehicle, so each vehicle gets its own copy
+// of that same content, labeled "Vehicle N".
+function VehicleDetailCard({
+  vehicle,
+  index,
+  serviceType,
+  billingMode,
+}: {
+  vehicle: TripSheetVehicle;
+  index: number;
+  serviceType: TripServiceType;
+  billingMode: TripBillingMode;
+}) {
+  const { data: driver } = useDriver(vehicle.driver_id ?? undefined);
+  const ruleType = deriveRuleType(serviceType, billingMode);
+
+  return (
+    <div className="rounded-lg border bg-white p-4">
+      <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-gray-700">
+        Vehicle {index + 1}
+        <span className="inline-flex items-center gap-1.5 font-normal text-gray-600">
+          {vehicle.snapshot_vehicle_number} · {VEHICLE_TYPE_LABELS[vehicle.snapshot_vehicle_type]}
+          {vehicle.pricing_source === "MANUAL" && (
+            <span
+              className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-gray-500"
+              title="Sub-contracted vehicle, manually priced"
+            >
+              External
+            </span>
+          )}
+        </span>
+      </h2>
+
+      <div className="grid grid-cols-3 gap-4">
+        <DetailRow label="Driver" value={driver?.full_name} />
+        {ruleType === "LOCAL_PACKAGE" && (
+          <>
+            <DetailRow label="Base Price" value={formatPaiseAsRupees(vehicle.snap_base_price_paise)} />
+            <DetailRow label="Base Hours" value={vehicle.snap_base_hours} />
+            <DetailRow label="Base Km" value={vehicle.snap_base_km} />
+            <DetailRow label="Extra Km Rate" value={formatPaiseAsRupees(vehicle.snap_extra_km_rate_paise)} />
+            <DetailRow label="Extra Hour Rate" value={formatPaiseAsRupees(vehicle.snap_extra_hr_rate_paise)} />
+          </>
+        )}
+        {ruleType === "OUTSTATION_SLAB" && (
+          <>
+            <DetailRow label="Slab Rate" value={formatPaiseAsRupees(vehicle.snap_slab_rate_paise)} />
+            <DetailRow label="Min Km Per Day" value={vehicle.snap_min_km_per_day} />
+            <DetailRow label="Driver Batta Per Day" value={formatPaiseAsRupees(vehicle.snap_driver_batta_per_day_paise)} />
+          </>
+        )}
+        {ruleType === "PERFORMANCE" && (
+          <>
+            <DetailRow label="Per Km Rate" value={formatPaiseAsRupees(vehicle.snap_per_km_rate_paise)} />
+            <DetailRow label="Performance Batta" value={formatPaiseAsRupees(vehicle.snap_performance_batta_paise)} />
+          </>
+        )}
+        <DetailRow label="Total KM" value={vehicle.total_km} />
+        <DetailRow label="Total Hours" value={vehicle.total_hours} />
+        <DetailRow label="Total Days" value={vehicle.total_days} />
+        <DetailRow label="Opening KM" value={vehicle.opening_km} />
+        <DetailRow label="Closing KM" value={vehicle.closing_km} />
+      </div>
+
+      <div className="mt-4 flex flex-col gap-1.5 text-sm">
+        {vehicle.breakdown.map((item, i) => (
+          <div key={i} className="flex justify-between text-gray-600">
+            <span>
+              {item.label}
+              {item.detail && <span className="text-xs text-gray-400"> ({item.detail})</span>}
+            </span>
+            <span>{formatPaiseAsRupees(item.value_paise)}</span>
+          </div>
+        ))}
+        <div className="mt-2 flex justify-between border-t pt-2 font-semibold text-gray-900">
+          <span>Net Payable</span>
+          <span>{formatPaiseAsRupees(vehicle.net_payable_paise)}</span>
+        </div>
+      </div>
     </div>
   );
 }
@@ -94,7 +181,6 @@ export function TripSheetDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { data: trip, isLoading } = useTripSheet(id);
-  const { data: driver } = useDriver(trip?.driver_id ?? undefined);
   const finalizeTrip = useFinalizeTripSheet();
   const cancelTrip = useCancelTripSheet();
   const downloadPdf = useDownloadTripSheetPdf();
@@ -200,97 +286,43 @@ export function TripSheetDetailPage() {
             <DetailRow label="Trip Date" value={trip.trip_date} />
             <DetailRow label="Booked By" value={trip.booked_by} />
             <DetailRow label="Customer" value={trip.snapshot_customer_name} />
-            <DetailRow
-              label="Vehicle"
-              value={
-                <span className="inline-flex items-center gap-1.5">
-                  {trip.snapshot_vehicle_number} · {VEHICLE_TYPE_LABELS[trip.snapshot_vehicle_type]}
-                  {trip.pricing_source === "MANUAL" && (
-                    <span
-                      className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-gray-500"
-                      title="Sub-contracted vehicle, manually priced"
-                    >
-                      External
-                    </span>
-                  )}
-                </span>
-              }
-            />
-            <DetailRow label="Driver" value={driver?.full_name} />
+            <DetailRow label="Vehicles" value={trip.vehicle_count} />
             <DetailRow label="Notes" value={trip.remarks} />
           </div>
         </div>
 
-        <div className="rounded-lg border bg-white p-4">
-          <h2 className="mb-3 text-sm font-semibold text-gray-700">Rate Details</h2>
-          <div className="grid grid-cols-3 gap-4">
-            {deriveRuleType(trip.service_type, trip.billing_mode) === "LOCAL_PACKAGE" && (
-              <>
-                <DetailRow label="Base Price" value={formatPaiseAsRupees(trip.snap_base_price_paise)} />
-                <DetailRow label="Base Hours" value={trip.snap_base_hours} />
-                <DetailRow label="Base Km" value={trip.snap_base_km} />
-                <DetailRow label="Extra Km Rate" value={formatPaiseAsRupees(trip.snap_extra_km_rate_paise)} />
-                <DetailRow label="Extra Hour Rate" value={formatPaiseAsRupees(trip.snap_extra_hr_rate_paise)} />
-              </>
-            )}
-            {deriveRuleType(trip.service_type, trip.billing_mode) === "OUTSTATION_SLAB" && (
-              <>
-                <DetailRow label="Slab Rate" value={formatPaiseAsRupees(trip.snap_slab_rate_paise)} />
-                <DetailRow label="Min Km Per Day" value={trip.snap_min_km_per_day} />
-                <DetailRow label="Driver Batta Per Day" value={formatPaiseAsRupees(trip.snap_driver_batta_per_day_paise)} />
-              </>
-            )}
-            {deriveRuleType(trip.service_type, trip.billing_mode) === "PERFORMANCE" && (
-              <>
-                <DetailRow label="Per Km Rate" value={formatPaiseAsRupees(trip.snap_per_km_rate_paise)} />
-                <DetailRow label="Performance Batta" value={formatPaiseAsRupees(trip.snap_performance_batta_paise)} />
-              </>
-            )}
-          </div>
-        </div>
+        {trip.vehicles.map((vehicle, idx) => (
+          <VehicleDetailCard
+            key={vehicle.id}
+            vehicle={vehicle}
+            index={idx}
+            serviceType={trip.service_type}
+            billingMode={trip.billing_mode}
+          />
+        ))}
 
-        <div className="rounded-lg border bg-white p-4">
-          <h2 className="mb-3 text-sm font-semibold text-gray-700">Usage</h2>
-          <div className="grid grid-cols-3 gap-4">
-            <DetailRow label="Total KM" value={trip.total_km} />
-            <DetailRow label="Total Hours" value={trip.total_hours} />
-            <DetailRow label="Total Days" value={trip.total_days} />
-            <DetailRow label="Opening KM" value={trip.opening_km} />
-            <DetailRow label="Closing KM" value={trip.closing_km} />
-          </div>
-          {trip.tolls.length > 0 && (
-            <div className="mt-4">
-              <div className="mb-1 text-xs font-medium uppercase tracking-wide text-gray-400">Toll Receipts</div>
-              <div className="flex flex-col gap-1">
-                {trip.tolls.map((t) => (
-                  <div key={t.id} className="flex justify-between text-sm text-gray-700">
-                    <span>{t.plaza_name}</span>
-                    <span>{formatPaiseAsRupees(t.amount_paise)}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-
-        <div className="rounded-lg border bg-white p-4">
-          <h2 className="mb-3 text-sm font-semibold text-gray-700">Billing Breakdown</h2>
-          <div className="flex flex-col gap-1.5 text-sm">
-            {trip.breakdown.map((item, i) => (
-              <div key={i} className="flex justify-between text-gray-600">
-                <span>
-                  {item.label}
-                  {item.detail && <span className="text-xs text-gray-400"> ({item.detail})</span>}
-                </span>
-                <span>{formatPaiseAsRupees(item.value_paise)}</span>
-              </div>
-            ))}
-            <div className="mt-2 flex justify-between border-t pt-2 font-semibold text-gray-900">
-              <span>Net Payable</span>
-              <span>{formatPaiseAsRupees(trip.net_payable_paise)}</span>
+        {trip.tolls.length > 0 && (
+          <div className="rounded-lg border bg-white p-4">
+            <h2 className="mb-3 text-sm font-semibold text-gray-700">Toll Receipts</h2>
+            <div className="flex flex-col gap-1">
+              {trip.tolls.map((t) => (
+                <div key={t.id} className="flex justify-between text-sm text-gray-700">
+                  <span>{t.plaza_name}</span>
+                  <span>{formatPaiseAsRupees(t.amount_paise)}</span>
+                </div>
+              ))}
             </div>
           </div>
-        </div>
+        )}
+
+        {trip.vehicle_count > 1 && (
+          <div className="rounded-lg border bg-white p-4">
+            <div className="flex justify-between font-semibold text-gray-900">
+              <span>Total Net Payable ({trip.vehicle_count} vehicles)</span>
+              <span>{formatPaiseAsRupees(trip.total_net_payable_paise)}</span>
+            </div>
+          </div>
+        )}
 
         <div className="rounded-lg border bg-white p-4">
           <h2 className="mb-3 text-sm font-semibold text-gray-700">Lifecycle</h2>

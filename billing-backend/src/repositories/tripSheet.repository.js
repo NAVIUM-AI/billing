@@ -19,48 +19,37 @@
 const { apiError } = require("../utils/httpError");
 
 const UNIQUE_VIOLATION = "23505";
-const CHECK_VIOLATION = "23514";
 
 // Columns editable while a trip is DRAFT (Task 3.3#updateDraft below).
-// Deliberately excludes identity/audit columns — trip_sheet_number,
-// service_type, billing_mode, customer_id, vehicle_id, pricing_rule_id,
-// every snapshot_*/snap_* field, tenant_id, status, and every audit
-// column (created_by, created_at, finalized_*, cancelled_*,
-// cancellation_reason, invoiced_at, invoice_id) can never reach this
-// function no matter what a caller passes in — rate immutability
-// (ADR-005) and the trip's core identity are preserved even during
-// DRAFT editing. base/extras/subtotal/gross/net are listed together
-// because the service always rewrites them as a group on every PATCH
-// (it recomputes via the pricing engine, never patches them
-// independently).
+// Task B1 (multi-vehicle restructure) moved every per-vehicle field
+// (usage, charges, computed totals, driver_id) off this table onto
+// trip_sheet_vehicles — those are now edited via
+// tripSheetVehicle.repository.js#deleteBySheet + insertBatch
+// (delete-then-reinsert the whole array), not through this whitelist.
+// What's left here is genuinely sheet-level: trip_date, booked_by,
+// pax_note, remarks (user-editable), plus vehicle_count and
+// total_net_payable_paise (written by the service as a pair, alongside
+// the vehicle-array replace, never independently). Deliberately still
+// excludes identity/audit columns — trip_sheet_number, service_type,
+// billing_mode, customer_id, tenant_id, status, and every audit column
+// — same immutability guarantee as before (ADR-005).
 const DRAFT_UPDATABLE_COLUMNS = [
   "trip_date",
-  "start_datetime",
-  "end_datetime",
-  "opening_km",
-  "closing_km",
-  "total_km",
-  "total_hours",
-  "total_days",
-  "toll_paise",
-  "parking_paise",
-  "permit_paise",
-  "fasttag_paise",
-  "advance_paise",
-  "base_amount_paise",
-  "extras_amount_paise",
-  "driver_batta_paise",
-  "subtotal_paise",
-  "gross_paise",
-  "net_payable_paise",
-  "breakdown",
   "booked_by",
   "pax_note",
   "remarks",
-  "driver_id",
+  "vehicle_count",
+  "total_net_payable_paise",
 ];
 
 /**
+ * Sheet-level insert only (Task B1) — the per-vehicle fields this
+ * function used to take now go through
+ * tripSheetVehicle.repository.js#insertBatch, called separately by the
+ * service within the same transaction. `vehicleCount`/
+ * `totalNetPayablePaise` are derived by the service from the vehicle
+ * array it's about to insert alongside this row.
+ *
  * @param {string} tenantId
  * @param {object} params
  * @param {import('pg').PoolClient} client
@@ -74,39 +63,15 @@ async function insert(
     billingMode,
     customerId,
     manualCustomerName,
-    vehicleId,
-    driverId,
-    pricingRuleId,
-    pricingSource,
-    snapshotVehicleNumber,
-    snapshotVehicleType,
     snapshotCustomerName,
     snapshotCustomerGstin,
-    snap,
     tripDate,
-    startDatetime,
-    endDatetime,
-    openingKm,
-    closingKm,
-    totalKm,
-    totalHours,
-    totalDays,
-    tollPaise,
-    parkingPaise,
-    permitPaise,
-    fasttagPaise,
-    advancePaise,
-    baseAmountPaise,
-    extrasAmountPaise,
-    driverBattaPaise,
-    subtotalPaise,
-    grossPaise,
-    netPayablePaise,
-    breakdown,
     bookedBy,
     paxNote,
     remarks,
     createdBy,
+    vehicleCount,
+    totalNetPayablePaise,
   },
   client,
 ) {
@@ -114,39 +79,17 @@ async function insert(
     const result = await client.query(
       `INSERT INTO trip_sheets (
          tenant_id, trip_sheet_number, service_type, billing_mode,
-         customer_id, manual_customer_name, vehicle_id, driver_id, pricing_rule_id,
-         snapshot_vehicle_number, snapshot_vehicle_type,
+         customer_id, manual_customer_name,
          snapshot_customer_name, snapshot_customer_gstin,
-         snap_base_hours, snap_base_km, snap_base_price_paise,
-         snap_extra_km_rate_paise, snap_extra_hr_rate_paise,
-         snap_slab_rate_paise, snap_min_km_per_day,
-         snap_driver_batta_per_day_paise, snap_per_km_rate_paise,
-         snap_performance_batta_paise,
-         trip_date, start_datetime, end_datetime,
-         opening_km, closing_km, total_km, total_hours, total_days,
-         toll_paise, parking_paise, permit_paise, fasttag_paise, advance_paise,
-         base_amount_paise, extras_amount_paise, driver_batta_paise,
-         subtotal_paise, gross_paise, net_payable_paise,
-         breakdown, booked_by, pax_note, remarks, created_by,
-         pricing_source
+         trip_date, booked_by, pax_note, remarks, created_by,
+         vehicle_count, total_net_payable_paise
        )
        VALUES (
          $1, $2, $3::trip_service_type_enum, $4::trip_billing_mode_enum,
-         $5, $6, $7, $8, $9,
-         $10, $11::vehicle_type_enum,
-         $12, $13,
-         $14, $15, $16,
-         $17, $18,
-         $19, $20,
-         $21, $22,
-         $23,
-         $24::date, $25, $26,
-         $27, $28, $29, $30, $31,
-         $32, $33, $34, $35, $36,
-         $37, $38, $39,
-         $40, $41, $42,
-         $43, $44, $45, $46, $47,
-         $48
+         $5, $6,
+         $7, $8,
+         $9::date, $10, $11, $12, $13,
+         $14, $15
        )
        RETURNING *`,
       [
@@ -156,48 +99,15 @@ async function insert(
         billingMode,
         customerId,
         manualCustomerName || null,
-        vehicleId,
-        driverId || null,
-        pricingRuleId || null,
-        snapshotVehicleNumber,
-        snapshotVehicleType,
         snapshotCustomerName,
         snapshotCustomerGstin || null,
-        snap.baseHours ?? null,
-        snap.baseKm ?? null,
-        snap.basePricePaise ?? null,
-        snap.extraKmRatePaise ?? null,
-        snap.extraHrRatePaise ?? null,
-        snap.slabRatePaise ?? null,
-        snap.minKmPerDay ?? null,
-        snap.driverBattaPerDayPaise ?? null,
-        snap.perKmRatePaise ?? null,
-        snap.performanceBattaPaise ?? null,
         tripDate,
-        startDatetime || null,
-        endDatetime || null,
-        openingKm ?? null,
-        closingKm ?? null,
-        totalKm,
-        totalHours,
-        totalDays,
-        tollPaise,
-        parkingPaise,
-        permitPaise,
-        fasttagPaise,
-        advancePaise,
-        baseAmountPaise,
-        extrasAmountPaise,
-        driverBattaPaise,
-        subtotalPaise,
-        grossPaise,
-        netPayablePaise,
-        JSON.stringify(breakdown),
         bookedBy || null,
         paxNote || null,
         remarks || null,
         createdBy || null,
-        pricingSource || "FLEET",
+        vehicleCount,
+        totalNetPayablePaise,
       ],
     );
     return result.rows[0];
@@ -212,18 +122,6 @@ async function insert(
         "Trip sheet number already in use. Retry.",
         { trip_sheet_number: tripSheetNumber },
       );
-    }
-    if (err.code === CHECK_VIOLATION) {
-      if (err.constraint === "trip_sheets_km_range") {
-        throw apiError(400, "INVALID_KM_RANGE", "closing_km must be >= opening_km");
-      }
-      if (err.constraint === "trip_sheets_datetime_range") {
-        throw apiError(
-          400,
-          "INVALID_DATETIME_RANGE",
-          "end_datetime must be >= start_datetime",
-        );
-      }
     }
     throw err;
   }
@@ -398,42 +296,27 @@ async function updateDraft(tenantId, id, patch, client) {
     throw apiError(400, "EMPTY_PATCH", "No valid fields to update.");
   }
 
-  // $1 = id, $2 = tenantId, so column placeholders start at $3.
+  // $1 = id, $2 = tenantId, so column placeholders start at $3. The
+  // km-range/datetime-range CHECK constraints moved to
+  // trip_sheet_vehicles with the fields they guard (Task B1) — a DRAFT
+  // patch to THIS table can no longer violate them, so there's nothing
+  // left to catch here.
   const setClause = keys
     .map((key, i) => {
       const placeholder = `$${i + 3}`;
       if (key === "trip_date") return `${key} = ${placeholder}::date`;
-      if (key === "start_datetime" || key === "end_datetime") return `${key} = ${placeholder}::timestamptz`;
-      if (key === "breakdown") return `${key} = ${placeholder}::jsonb`;
-      if (key === "driver_id") return `${key} = ${placeholder}::uuid`;
       return `${key} = ${placeholder}`;
     })
     .join(", ");
-  const values = keys.map((key) => (key === "breakdown" ? JSON.stringify(patch[key]) : patch[key]));
+  const values = keys.map((key) => patch[key]);
 
-  try {
-    const result = await client.query(
-      `UPDATE trip_sheets SET ${setClause}
-       WHERE id = $1 AND tenant_id = $2 AND status = 'DRAFT'::trip_status_enum
-       RETURNING *`,
-      [id, tenantId, ...values],
-    );
-    return result.rows[0] || null;
-  } catch (err) {
-    if (err.code === CHECK_VIOLATION) {
-      if (err.constraint === "trip_sheets_km_range") {
-        throw apiError(400, "INVALID_KM_RANGE", "closing_km must be >= opening_km");
-      }
-      if (err.constraint === "trip_sheets_datetime_range") {
-        throw apiError(
-          400,
-          "INVALID_DATETIME_RANGE",
-          "end_datetime must be >= start_datetime",
-        );
-      }
-    }
-    throw err;
-  }
+  const result = await client.query(
+    `UPDATE trip_sheets SET ${setClause}
+     WHERE id = $1 AND tenant_id = $2 AND status = 'DRAFT'::trip_status_enum
+     RETURNING *`,
+    [id, tenantId, ...values],
+  );
+  return result.rows[0] || null;
 }
 
 // Sort column whitelist — hardcoded here as defense in depth on top of
@@ -487,13 +370,21 @@ async function list(
     params.push(customerId);
     i++;
   }
+  // vehicle_id/driver_id moved to trip_sheet_vehicles (Task B1) — a
+  // sheet matches if ANY of its vehicles has this id, expressed as an
+  // EXISTS rather than a JOIN so a sheet with N matching vehicles still
+  // appears exactly once.
   if (vehicleId) {
-    wheres.push(`vehicle_id = $${i}::uuid`);
+    wheres.push(
+      `EXISTS (SELECT 1 FROM trip_sheet_vehicles tsv WHERE tsv.trip_sheet_id = trip_sheets.id AND tsv.vehicle_id = $${i}::uuid)`,
+    );
     params.push(vehicleId);
     i++;
   }
   if (driverId) {
-    wheres.push(`driver_id = $${i}::uuid`);
+    wheres.push(
+      `EXISTS (SELECT 1 FROM trip_sheet_vehicles tsv WHERE tsv.trip_sheet_id = trip_sheets.id AND tsv.driver_id = $${i}::uuid)`,
+    );
     params.push(driverId);
     i++;
   }
@@ -562,27 +453,45 @@ async function list(
 
   // (A) Data query — same WHERE, with sort + paging. Deliberately omits
   // breakdown (large JSONB), snap_* fields, and tolls — those are
-  // single-trip GET only, keeping the list payload small.
+  // single-trip GET only, keeping the list payload small. Per-vehicle
+  // detail is no longer a sheet-level scalar (Task B1); the list row
+  // gets vehicle_count plus a LATERAL-joined summary of vehicle #1
+  // (line_number = 1) — "count + first vehicle" is the Part B.2
+  // decision for the list screen (full per-vehicle detail is
+  // GET /trips/:id only). sum_total_km sums across every vehicle on the
+  // sheet, for parity with the pre-restructure single-vehicle total_km
+  // column.
   const dataParams = [...params, limit, offset];
   const dataResult = await client.query(
     `SELECT
-       id, tenant_id, trip_sheet_number,
-       service_type, billing_mode, status,
-       customer_id, vehicle_id, driver_id,
-       pricing_source,
-       snapshot_vehicle_number,
-       snapshot_vehicle_type,
-       snapshot_customer_name,
-       snapshot_customer_gstin,
-       trip_date, total_km, total_hours,
-       total_days,
-       subtotal_paise, gross_paise,
-       net_payable_paise,
-       advance_paise,
-       finalized_at, cancelled_at,
-       invoice_id,
-       created_at, updated_at
+       trip_sheets.id, trip_sheets.tenant_id, trip_sheets.trip_sheet_number,
+       trip_sheets.service_type, trip_sheets.billing_mode, trip_sheets.status,
+       trip_sheets.customer_id,
+       trip_sheets.snapshot_customer_name,
+       trip_sheets.snapshot_customer_gstin,
+       trip_sheets.trip_date,
+       trip_sheets.vehicle_count,
+       trip_sheets.total_net_payable_paise,
+       trip_sheets.finalized_at, trip_sheets.cancelled_at,
+       trip_sheets.invoice_id,
+       trip_sheets.created_at, trip_sheets.updated_at,
+       fv.vehicle_id       AS first_vehicle_id,
+       fv.vehicle_number   AS first_vehicle_number,
+       fv.vehicle_type     AS first_vehicle_type,
+       fv.pricing_source   AS first_vehicle_pricing_source,
+       COALESCE(agg.sum_total_km, 0)::integer AS sum_total_km
      FROM trip_sheets
+     LEFT JOIN LATERAL (
+       SELECT tsv.vehicle_id, tsv.snapshot_vehicle_number AS vehicle_number,
+              tsv.snapshot_vehicle_type AS vehicle_type, tsv.pricing_source
+       FROM trip_sheet_vehicles tsv
+       WHERE tsv.trip_sheet_id = trip_sheets.id AND tsv.line_number = 1
+     ) fv ON true
+     LEFT JOIN LATERAL (
+       SELECT SUM(tsv2.total_km) AS sum_total_km
+       FROM trip_sheet_vehicles tsv2
+       WHERE tsv2.trip_sheet_id = trip_sheets.id
+     ) agg ON true
      WHERE ${whereClause}
      ${orderBy}
      LIMIT $${i} OFFSET $${i + 1}`,
@@ -593,12 +502,14 @@ async function list(
   // params), no sort/paging. Reusing `wheres`/`params` rather than a
   // second hand-written WHERE clause is deliberate: copy-pasting the
   // clause into two strings creates drift the moment a new filter is
-  // added to one but not the other.
+  // added to one but not the other. gross_paise had no sheet-level
+  // equivalent after the restructure (it was always per-vehicle) — its
+  // aggregate is dropped rather than fabricated; sum_net_payable_paise
+  // now sums the sheet-level total_net_payable_paise column.
   const aggResult = await client.query(
     `SELECT
        COUNT(*)::bigint AS total_count,
-       COALESCE(SUM(net_payable_paise), 0)::bigint AS sum_net_payable_paise,
-       COALESCE(SUM(gross_paise), 0)::bigint AS sum_gross_paise,
+       COALESCE(SUM(total_net_payable_paise), 0)::bigint AS sum_net_payable_paise,
        COALESCE(COUNT(*) FILTER (WHERE status = 'DRAFT'::trip_status_enum), 0)::bigint AS count_draft,
        COALESCE(COUNT(*) FILTER (WHERE status = 'FINALIZED'::trip_status_enum), 0)::bigint AS count_finalized,
        COALESCE(COUNT(*) FILTER (WHERE status = 'INVOICED'::trip_status_enum), 0)::bigint AS count_invoiced,
@@ -614,7 +525,6 @@ async function list(
     total_count: Number(agg.total_count),
     aggregates: {
       sum_net_payable_paise: Number(agg.sum_net_payable_paise),
-      sum_gross_paise: Number(agg.sum_gross_paise),
       count_by_status: {
         DRAFT: Number(agg.count_draft),
         FINALIZED: Number(agg.count_finalized),
@@ -631,9 +541,9 @@ async function list(
 // PERF_SORT_BY_VALUES whitelist (defense in depth, same pattern as
 // list()/SORT_WHITELIST above).
 const PERF_SORT_WHITELIST = {
-  trip_date: "trip_date",
-  total_km: "total_km",
-  net_payable_paise: "net_payable_paise",
+  trip_date: "t.trip_date",
+  total_km: "tsv.total_km",
+  net_payable_paise: "tsv.net_payable_paise",
 };
 
 /**
@@ -648,6 +558,16 @@ const PERF_SORT_WHITELIST = {
  * billing_mode = 'PERFORMANCE' is ALWAYS applied and cannot be
  * overridden by any caller-supplied filter — it's the fixed definition
  * of what a performance sheet is.
+ *
+ * Task B1: now joins trip_sheet_vehicles (INNER — a trip sheet always
+ * has >=1 vehicle) instead of reading vehicle/usage/cost columns
+ * straight off trip_sheets. This means a multi-vehicle PERFORMANCE trip
+ * now contributes ONE ROW PER VEHICLE, each with its own vehicle/cost
+ * detail and the SAME trip_id repeated across its rows — the correct
+ * behavior for a cost ledger (each vehicle's running cost is a real,
+ * distinct line), and performanceSheet.service.js's own grouping/sum
+ * logic is already generic over `row.*` fields, so it needs no changes
+ * to handle multiple rows sharing a trip_id.
  *
  * @param {string} tenantId
  * @param {{ customerId: ?string, vehicleId: ?string, driverId: ?string, fromDate: ?string, toDate: ?string, serviceType: ?string, statusIn: ?string[], includeCancelled: boolean, sortBy: string, sortDir: string, maxRows: number }} params
@@ -669,12 +589,12 @@ async function listPerformanceRows(
     i++;
   }
   if (vehicleId) {
-    wheres.push(`t.vehicle_id = $${i}::uuid`);
+    wheres.push(`tsv.vehicle_id = $${i}::uuid`);
     params.push(vehicleId);
     i++;
   }
   if (driverId) {
-    wheres.push(`t.driver_id = $${i}::uuid`);
+    wheres.push(`tsv.driver_id = $${i}::uuid`);
     params.push(driverId);
     i++;
   }
@@ -715,9 +635,10 @@ async function listPerformanceRows(
   const orderDir = sortDir.toUpperCase() === "ASC" ? "ASC" : "DESC";
   // Secondary sort by customer_display_name keeps group boundaries
   // stable when the primary sort ties (same trip_date across two
-  // customers always sorts predictably); tertiary by id breaks any
-  // remaining tie deterministically.
-  const orderBy = `ORDER BY t.${orderCol} ${orderDir}, customer_display_name ASC, t.id ASC`;
+  // customers always sorts predictably); tertiary by (t.id, tsv.line_number)
+  // breaks any remaining tie deterministically, including between the
+  // multiple rows a single multi-vehicle trip now contributes.
+  const orderBy = `ORDER BY ${orderCol} ${orderDir}, customer_display_name ASC, t.id ASC, tsv.line_number ASC`;
 
   // Fetch maxRows + 1 so we can detect truncation without a second
   // COUNT(*) round-trip: if we get back maxRows+1 rows, there were more
@@ -727,19 +648,21 @@ async function listPerformanceRows(
     `SELECT
        t.id                       AS trip_id,
        t.trip_date                AS trip_date,
-       t.snapshot_vehicle_type    AS vehicle_type,
-       t.snapshot_vehicle_number  AS vehicle_number,
-       t.total_km                 AS total_running_km,
-       COALESCE(t.snap_per_km_rate_paise, 0) AS per_km_rate_paise,
-       t.base_amount_paise        AS running_cost_paise,
-       t.driver_batta_paise       AS batta_paise,
-       t.toll_paise               AS toll_paise,
-       t.net_payable_paise        AS total_paise,
+       tsv.snapshot_vehicle_type    AS vehicle_type,
+       tsv.snapshot_vehicle_number  AS vehicle_number,
+       tsv.total_km                 AS total_running_km,
+       COALESCE(tsv.snap_per_km_rate_paise, 0) AS per_km_rate_paise,
+       tsv.base_amount_paise        AS running_cost_paise,
+       tsv.driver_batta_paise       AS batta_paise,
+       tsv.toll_paise               AS toll_paise,
+       tsv.net_payable_paise        AS total_paise,
        t.status                   AS status,
        t.customer_id              AS customer_id,
        COALESCE(c.company_name, c.name, '') AS customer_display_name,
        c.customer_type            AS customer_type
      FROM trip_sheets t
+     JOIN trip_sheet_vehicles tsv
+       ON tsv.trip_sheet_id = t.id AND tsv.tenant_id = t.tenant_id
      LEFT JOIN customers c
        ON c.id = t.customer_id
        AND c.tenant_id = t.tenant_id
@@ -823,6 +746,16 @@ async function releaseHold(tenantId, invoiceId, client) {
  * relevance — this is a checklist an ops person scans month by month,
  * not a search result.
  *
+ * Task B1 / Part G: `AND vehicle_count = 1` — the GST invoice engine
+ * only knows how to fan a trip into ONE invoice_line per sheet
+ * (invoice.service.js#buildInvoiceLines); a multi-vehicle trip is
+ * EXCLUDED here at the source rather than reaching the picker and
+ * risking a silent under-bill. B2 (a separate, later task) is what
+ * teaches the invoice engine to fan a trip into N lines — until then
+ * this filter is the enforcement point. Because only single-vehicle
+ * sheets reach this query, the INNER JOIN's `line_number = 1` always
+ * resolves to that sheet's one and only vehicle.
+ *
  * @param {string} tenantId
  * @param {string} customerId
  * @param {?string} excludeInvoiceId
@@ -832,59 +765,27 @@ async function releaseHold(tenantId, invoiceId, client) {
 async function findInvoiceableForCustomer(tenantId, customerId, excludeInvoiceId, client) {
   const result = await client.query(
     `SELECT
-       id, trip_sheet_number, service_type, billing_mode, trip_date,
-       snapshot_vehicle_number, snapshot_vehicle_type,
-       total_km, total_hours, total_days,
-       base_amount_paise, extras_amount_paise, driver_batta_paise,
-       toll_paise, parking_paise, permit_paise, fasttag_paise,
-       advance_paise,
-       subtotal_paise, gross_paise, net_payable_paise,
-       held_by_invoice_id,
-       created_at
-     FROM trip_sheets
-     WHERE tenant_id = $1::uuid
-       AND customer_id = $2::uuid
-       AND status = 'FINALIZED'::trip_status_enum
-       AND (held_by_invoice_id IS NULL OR held_by_invoice_id = $3::uuid)
-     ORDER BY trip_date ASC, id ASC`,
+       t.id, t.trip_sheet_number, t.service_type, t.billing_mode, t.trip_date,
+       tsv.snapshot_vehicle_number, tsv.snapshot_vehicle_type,
+       tsv.total_km, tsv.total_hours, tsv.total_days,
+       tsv.base_amount_paise, tsv.extras_amount_paise, tsv.driver_batta_paise,
+       tsv.toll_paise, tsv.parking_paise, tsv.permit_paise, tsv.fasttag_paise,
+       tsv.advance_paise,
+       tsv.subtotal_paise, tsv.gross_paise, tsv.net_payable_paise,
+       t.held_by_invoice_id,
+       t.created_at
+     FROM trip_sheets t
+     JOIN trip_sheet_vehicles tsv
+       ON tsv.trip_sheet_id = t.id AND tsv.tenant_id = t.tenant_id AND tsv.line_number = 1
+     WHERE t.tenant_id = $1::uuid
+       AND t.customer_id = $2::uuid
+       AND t.status = 'FINALIZED'::trip_status_enum
+       AND t.vehicle_count = 1
+       AND (t.held_by_invoice_id IS NULL OR t.held_by_invoice_id = $3::uuid)
+     ORDER BY t.trip_date ASC, t.id ASC`,
     [tenantId, customerId, excludeInvoiceId || null],
   );
   return result.rows;
-}
-
-/**
- * Sums each reimbursement column across a set of trips — the data
- * source for invoice.service.js#computeEffectiveReimbursements'
- * auto-sum. Deliberately does NOT validate that the trips are
- * FINALIZED/unheld/belong to this customer — that's
- * resolveTripsForInvoice's job; this is a pure aggregate over whatever
- * ids it's given, safe to call even mid-validation since a bad id just
- * contributes 0.
- *
- * @param {string} tenantId
- * @param {string[]} tripIds
- * @param {import('pg').PoolClient} client
- * @returns {Promise<{ toll_paise: number, parking_paise: number, permit_paise: number, fasttag_paise: number }>}
- */
-async function summarizeReimbursements(tenantId, tripIds, client) {
-  const result = await client.query(
-    `SELECT
-       COALESCE(SUM(toll_paise), 0)    AS toll_paise,
-       COALESCE(SUM(parking_paise), 0) AS parking_paise,
-       COALESCE(SUM(permit_paise), 0)  AS permit_paise,
-       COALESCE(SUM(fasttag_paise), 0) AS fasttag_paise
-     FROM trip_sheets
-     WHERE tenant_id = $1::uuid
-       AND id = ANY($2::uuid[])`,
-    [tenantId, tripIds],
-  );
-  const row = result.rows[0];
-  return {
-    toll_paise: Number(row.toll_paise) || 0,
-    parking_paise: Number(row.parking_paise) || 0,
-    permit_paise: Number(row.permit_paise) || 0,
-    fasttag_paise: Number(row.fasttag_paise) || 0,
-  };
 }
 
 module.exports = {
@@ -900,6 +801,5 @@ module.exports = {
   setHold,
   releaseHold,
   findInvoiceableForCustomer,
-  summarizeReimbursements,
   reverseInvoiced,
 };

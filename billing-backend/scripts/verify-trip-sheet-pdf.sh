@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
 #
 # End-to-end verification of Trip Sheet -> Proforma PDF generation
-# (Module 5 / Task A): a trip sheet can now render its own Proforma PDF
-# directly from its own frozen columns (no invoice involved), and its
-# customer is now optional — a real customer_id, a free-text
-# manual_customer_name, or neither. Mirrors scripts/verify-pdf.sh's
+# (Module 5 / Task A, extended by Task B1 for multi-vehicle): a trip
+# sheet can render its own Proforma PDF directly from its own frozen
+# columns (no invoice involved), its customer is optional (a real
+# customer_id, a free-text manual_customer_name, or neither), and as of
+# Task B1 a sheet can carry 1-10 vehicles, each contributing its own row
+# to the PDF, summed to one Net Payable. Mirrors scripts/verify-pdf.sh's
 # pdftotext-based content-assertion style and
 # scripts/verify-trip-sheet-manual.sh's tenant A/B setup conventions.
 #
 # Rule 13 note: this script is automation, not the acceptance gate —
 # every PDF it generates was also visually opened and reviewed by hand
 # (LOCAL+real customer, LOCAL+free-text name, LOCAL+no customer,
-# OUTSTATION+no customer) before this task was declared done. A green
-# run here does not by itself mean the layout is correct.
+# OUTSTATION+no customer, LOCAL+multi-vehicle, OUTSTATION+multi-vehicle)
+# before this task was declared done. A green run here does not by
+# itself mean the layout is correct.
 #
 # Deliberately `set -u` but NOT `set -e`: every check runs even if an
 # earlier one fails, so the summary reports everything broken in one
@@ -36,7 +39,7 @@ RESET=$'\033[0m'
 
 PASS=0
 FAIL=0
-TOTAL_CHECKS=14
+TOTAL_CHECKS=22
 FAILED_STEPS=()
 
 pass() {
@@ -116,8 +119,12 @@ echo "--------------"
 
 create_local_trip() {
   # $1 = extra JSON fragment for customer fields (or empty)
+  # Task B1: vehicle/rate/usage fields now live inside vehicles[] — one
+  # vehicle here, same rate values as before the restructure, so the
+  # 2,525 net-payable assertion below stays byte-for-byte comparable
+  # (backfill/parity requirement, Part I of the Task B1 spec).
   curl -s -X POST "$BASE_URL/trips" -H "Authorization: Bearer $OWNER_A_TOKEN" -H "Content-Type: application/json" \
-    -d "{\"service_type\":\"LOCAL\",\"billing_mode\":\"GST\",\"manual_vehicle_number\":\"KA51AK1031\",\"manual_vehicle_type\":\"SEDAN\",\"base_price_rupees\":2200,\"base_hours\":8,\"base_km\":80,\"extra_km_rate_rupees\":14,\"extra_hr_rate_rupees\":45,\"trip_date\":\"$TODAY\",\"total_km\":100,\"total_hours\":9,\"booked_by\":\"Verify Script\"$1}"
+    -d "{\"service_type\":\"LOCAL\",\"billing_mode\":\"GST\",\"trip_date\":\"$TODAY\",\"booked_by\":\"Verify Script\",\"vehicles\":[{\"manual_vehicle_number\":\"KA51AK1031\",\"manual_vehicle_type\":\"SEDAN\",\"base_price_rupees\":2200,\"base_hours\":8,\"base_km\":80,\"extra_km_rate_rupees\":14,\"extra_hr_rate_rupees\":45,\"total_km\":100,\"total_hours\":9}]$1}"
 }
 
 # ─── Step 1: LOCAL trip WITH a real customer -> Proforma PDF ───
@@ -185,7 +192,7 @@ fi
 
 # ─── Step 4: OUTSTATION trip -> Proforma PDF with outstation-shaped columns ───
 T_OUT_RESP=$(curl -s -X POST "$BASE_URL/trips" -H "Authorization: Bearer $OWNER_A_TOKEN" -H "Content-Type: application/json" \
-  -d "{\"service_type\":\"OUTSTATION\",\"billing_mode\":\"GST\",\"manual_vehicle_number\":\"KA51AK2042\",\"manual_vehicle_type\":\"INNOVA\",\"slab_rate_rupees\":14,\"min_km_per_day\":250,\"driver_batta_per_day_rupees\":300,\"trip_date\":\"$TODAY\",\"total_km\":300,\"total_hours\":10,\"toll_rupees\":100,\"booked_by\":\"Verify Script\"}")
+  -d "{\"service_type\":\"OUTSTATION\",\"billing_mode\":\"GST\",\"trip_date\":\"$TODAY\",\"booked_by\":\"Verify Script\",\"vehicles\":[{\"manual_vehicle_number\":\"KA51AK2042\",\"manual_vehicle_type\":\"INNOVA\",\"slab_rate_rupees\":14,\"min_km_per_day\":250,\"driver_batta_per_day_rupees\":300,\"total_km\":300,\"total_hours\":10,\"toll_rupees\":100}]}")
 T_OUT=$(echo "$T_OUT_RESP" | jq -r '.trip.id // empty')
 curl -s -X POST "$BASE_URL/trips/$T_OUT/finalize" -H "Authorization: Bearer $OWNER_A_TOKEN" > /dev/null
 curl -s -X POST "$BASE_URL/trips/$T_OUT/pdf" -H "Authorization: Bearer $OWNER_A_TOKEN" > /dev/null
@@ -260,6 +267,96 @@ if [ "$FAKE_STATUS" = "404" ] && [ "$FAKE_CODE" = "TRIP_NOT_FOUND" ]; then
   pass "Nonexistent trip id: 404 TRIP_NOT_FOUND"
 else
   fail "Nonexistent trip id" "status='$FAKE_STATUS', code='$FAKE_CODE'"
+fi
+
+# ─── Step 10: LOCAL sheet with 3 vehicles -> 3 rows, footer = sum, no GST ───
+T_MULTI3_RESP=$(curl -s -X POST "$BASE_URL/trips" -H "Authorization: Bearer $OWNER_A_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"service_type\":\"LOCAL\",\"billing_mode\":\"GST\",\"trip_date\":\"$TODAY\",\"customer_id\":\"$CUST\",\"vehicles\":[{\"manual_vehicle_number\":\"KA51AA0001\",\"manual_vehicle_type\":\"SEDAN\",\"base_price_rupees\":2200,\"base_hours\":8,\"base_km\":80,\"extra_km_rate_rupees\":14,\"extra_hr_rate_rupees\":45,\"total_km\":100,\"total_hours\":9},{\"manual_vehicle_number\":\"KA51AA0002\",\"manual_vehicle_type\":\"SUV\",\"base_price_rupees\":3200,\"base_hours\":8,\"base_km\":80,\"extra_km_rate_rupees\":18,\"extra_hr_rate_rupees\":55,\"total_km\":100,\"total_hours\":9},{\"manual_vehicle_number\":\"KA51AA0003\",\"manual_vehicle_type\":\"HATCHBACK\",\"base_price_rupees\":1800,\"base_hours\":8,\"base_km\":80,\"extra_km_rate_rupees\":12,\"extra_hr_rate_rupees\":40,\"total_km\":100,\"total_hours\":9}]}")
+T_MULTI3=$(echo "$T_MULTI3_RESP" | jq -r '.trip.id // empty')
+MULTI3_TOTAL_PAISE=$(echo "$T_MULTI3_RESP" | jq -r '.trip.total_net_payable_paise // empty')
+curl -s -X POST "$BASE_URL/trips/$T_MULTI3/finalize" -H "Authorization: Bearer $OWNER_A_TOKEN" > /dev/null
+curl -s -X POST "$BASE_URL/trips/$T_MULTI3/pdf" -H "Authorization: Bearer $OWNER_A_TOKEN" > /dev/null
+curl -s "$BASE_URL/trips/$T_MULTI3/pdf" -H "Authorization: Bearer $OWNER_A_TOKEN" -o "$WORK_DIR/t_multi3.pdf"
+MULTI3_TEXT=$(pdftotext -layout "$WORK_DIR/t_multi3.pdf" - 2>/dev/null)
+MULTI3_EXPECTED_RUPEES=$(awk -v p="$MULTI3_TOTAL_PAISE" 'BEGIN { printf "%.2f", p/100 }')
+
+if echo "$MULTI3_TEXT" | grep -q "KA51AA0001" && echo "$MULTI3_TEXT" | grep -q "KA51AA0002" && echo "$MULTI3_TEXT" | grep -q "KA51AA0003"; then
+  pass "LOCAL sheet with 3 vehicles: all 3 rows present"
+else
+  fail "LOCAL sheet with 3 vehicles" "one or more vehicle rows missing"
+fi
+
+if echo "$MULTI3_TEXT" | tr -d ',' | grep -q "$MULTI3_EXPECTED_RUPEES" && ! echo "$MULTI3_TEXT" | grep -qE "CGST|SGST|IGST"; then
+  pass "LOCAL sheet with 3 vehicles: footer sums to API's total_net_payable_paise ($MULTI3_EXPECTED_RUPEES), no GST"
+else
+  fail "LOCAL sheet with 3 vehicles" "expected footer '$MULTI3_EXPECTED_RUPEES' not found, or GST text present"
+fi
+
+# ─── Step 11: OUTSTATION sheet with 2 vehicles -> 2 rows, batta/toll per row, summed footer ───
+T_MULTI2OUT_RESP=$(curl -s -X POST "$BASE_URL/trips" -H "Authorization: Bearer $OWNER_A_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"service_type\":\"OUTSTATION\",\"billing_mode\":\"GST\",\"trip_date\":\"$TODAY\",\"customer_id\":\"$CUST\",\"vehicles\":[{\"manual_vehicle_number\":\"KA51BB0001\",\"manual_vehicle_type\":\"SEDAN\",\"slab_rate_rupees\":14,\"min_km_per_day\":250,\"driver_batta_per_day_rupees\":300,\"total_km\":300,\"total_hours\":10,\"toll_rupees\":100},{\"manual_vehicle_number\":\"KA51BB0002\",\"manual_vehicle_type\":\"INNOVA\",\"slab_rate_rupees\":18,\"min_km_per_day\":250,\"driver_batta_per_day_rupees\":350,\"total_km\":280,\"total_hours\":9,\"toll_rupees\":80}]}")
+T_MULTI2OUT=$(echo "$T_MULTI2OUT_RESP" | jq -r '.trip.id // empty')
+MULTI2OUT_TOTAL_PAISE=$(echo "$T_MULTI2OUT_RESP" | jq -r '.trip.total_net_payable_paise // empty')
+curl -s -X POST "$BASE_URL/trips/$T_MULTI2OUT/finalize" -H "Authorization: Bearer $OWNER_A_TOKEN" > /dev/null
+curl -s -X POST "$BASE_URL/trips/$T_MULTI2OUT/pdf" -H "Authorization: Bearer $OWNER_A_TOKEN" > /dev/null
+curl -s "$BASE_URL/trips/$T_MULTI2OUT/pdf" -H "Authorization: Bearer $OWNER_A_TOKEN" -o "$WORK_DIR/t_multi2out.pdf"
+MULTI2OUT_TEXT=$(pdftotext -layout "$WORK_DIR/t_multi2out.pdf" - 2>/dev/null)
+MULTI2OUT_EXPECTED_RUPEES=$(awk -v p="$MULTI2OUT_TOTAL_PAISE" 'BEGIN { printf "%.2f", p/100 }')
+
+if echo "$MULTI2OUT_TEXT" | grep -q "KA51BB0001" && echo "$MULTI2OUT_TEXT" | grep -q "KA51BB0002" && echo "$MULTI2OUT_TEXT" | grep -q "Bata"; then
+  pass "OUTSTATION sheet with 2 vehicles: both rows present with batta column"
+else
+  fail "OUTSTATION sheet with 2 vehicles" "one or more vehicle rows / batta column missing"
+fi
+
+if echo "$MULTI2OUT_TEXT" | tr -d ',' | grep -q "$MULTI2OUT_EXPECTED_RUPEES"; then
+  pass "OUTSTATION sheet with 2 vehicles: footer sums to API's total_net_payable_paise ($MULTI2OUT_EXPECTED_RUPEES)"
+else
+  fail "OUTSTATION sheet with 2 vehicles" "expected footer '$MULTI2OUT_EXPECTED_RUPEES' not found"
+fi
+
+# ─── Step 12: > 10 vehicles rejected with 400 ───
+MANY_VEHICLES=$(for i in $(seq 1 11); do printf '{"manual_vehicle_number":"KA51CC%04d","manual_vehicle_type":"SEDAN","base_price_rupees":2000,"base_hours":8,"base_km":80,"extra_km_rate_rupees":12,"extra_hr_rate_rupees":40,"total_km":100,"total_hours":9}' "$i"; [ "$i" -lt 11 ] && printf ','; done)
+TOO_MANY_STATUS=$(curl -s -o "$WORK_DIR/toomany.json" -w '%{http_code}' -X POST "$BASE_URL/trips" -H "Authorization: Bearer $OWNER_A_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"service_type\":\"LOCAL\",\"billing_mode\":\"GST\",\"trip_date\":\"$TODAY\",\"vehicles\":[$MANY_VEHICLES]}")
+
+if [ "$TOO_MANY_STATUS" = "400" ]; then
+  pass ">10 vehicles rejected with 400"
+else
+  fail ">10 vehicles rejected" "expected 400, got '$TOO_MANY_STATUS'"
+fi
+
+# ─── Step 13: 0 vehicles rejected with 400 ───
+ZERO_STATUS=$(curl -s -o "$WORK_DIR/zero.json" -w '%{http_code}' -X POST "$BASE_URL/trips" -H "Authorization: Bearer $OWNER_A_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"service_type\":\"LOCAL\",\"billing_mode\":\"GST\",\"trip_date\":\"$TODAY\",\"vehicles\":[]}")
+
+if [ "$ZERO_STATUS" = "400" ]; then
+  pass "0 vehicles rejected with 400"
+else
+  fail "0 vehicles rejected" "expected 400, got '$ZERO_STATUS'"
+fi
+
+# ─── Step 14: multi-vehicle trip does NOT appear in invoiceable-trips ───
+curl -s -X PATCH "$BASE_URL/settings/business" -H "Authorization: Bearer $OWNER_A_TOKEN" \
+  -H "Content-Type: application/json" -d '{"gst_rate":5}' > /dev/null
+INVOICEABLE=$(curl -s "$BASE_URL/customers/$CUST/invoiceable-trips" -H "Authorization: Bearer $OWNER_A_TOKEN")
+MULTI3_IN_PICKER=$(echo "$INVOICEABLE" | jq --arg id "$T_MULTI3" '[.groups.LOCAL.trips[] | select(.id == $id)] | length')
+
+if [ "$MULTI3_IN_PICKER" = "0" ]; then
+  pass "Multi-vehicle trip excluded from GET /customers/:id/invoiceable-trips"
+else
+  fail "Multi-vehicle trip exclusion" "found in invoiceable-trips picker (count=$MULTI3_IN_PICKER)"
+fi
+
+# ─── Step 15: single-vehicle trip still invoices end-to-end (GST unaffected) ───
+INV_CREATE_STATUS=$(curl -s -o "$WORK_DIR/inv.json" -w '%{http_code}' -X POST "$BASE_URL/invoices" -H "Authorization: Bearer $OWNER_A_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"invoice_type\":\"TAX\",\"customer_id\":\"$CUST\",\"invoice_date\":\"$TODAY\",\"trip_sheet_ids\":[\"$T_CUST\"]}")
+INV_LINE_COUNT=$(jq -r '.invoice.lines | length // 0' "$WORK_DIR/inv.json")
+
+if [ "$INV_CREATE_STATUS" = "201" ] && [ "$INV_LINE_COUNT" = "1" ]; then
+  pass "Single-vehicle trip still invoices end-to-end via GST wizard"
+else
+  fail "Single-vehicle GST invoicing" "status='$INV_CREATE_STATUS', line_count='$INV_LINE_COUNT'"
 fi
 
 # ─── SUMMARY ───

@@ -130,12 +130,16 @@ export function TripSheetsListScreen() {
     { key: "billing_mode", label: "Billing Mode", render: (t) => <BillingModeBadge mode={t.billing_mode} /> },
     { key: "customer", label: "Customer", render: (t) => t.snapshot_customer_name || "—" },
     {
+      // Task B1: a sheet can have up to 10 vehicles now — the list row
+      // only carries a "first vehicle" summary (full detail is the
+      // trip's own detail page), so this shows vehicle #1 plus a
+      // "+N more" cue whenever there's more than one.
       key: "vehicle",
       label: "Vehicle",
       render: (t) => (
         <span className="inline-flex items-center gap-1.5">
-          {t.snapshot_vehicle_number}
-          {t.pricing_source === "MANUAL" && (
+          {t.first_vehicle_number ?? "—"}
+          {t.first_vehicle_pricing_source === "MANUAL" && (
             <span
               className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-gray-500"
               title="Sub-contracted vehicle, manually priced"
@@ -143,10 +147,15 @@ export function TripSheetsListScreen() {
               External
             </span>
           )}
+          {t.vehicle_count > 1 && (
+            <span className="rounded bg-primary-50 px-1.5 py-0.5 text-[10px] font-medium text-primary-700">
+              +{t.vehicle_count - 1} more
+            </span>
+          )}
         </span>
       ),
     },
-    { key: "amount", label: "Amount", render: (t) => formatPaiseAsRupees(t.net_payable_paise) },
+    { key: "amount", label: "Amount", render: (t) => formatPaiseAsRupees(t.total_net_payable_paise) },
     { key: "status", label: "Status", render: (t) => <StatusBadge status={t.status} /> },
   ];
 

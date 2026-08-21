@@ -8,7 +8,7 @@ import { formatPaiseAsRupees } from "@/lib/money";
 
 type ActivityEvent =
   | { type: "invoice"; id: string; timestamp: string; invoiceNumber: string | null; customerName: string | null; amountPaise: number }
-  | { type: "trip"; id: string; timestamp: string; tripNumber: string; vehicleNumber: string };
+  | { type: "trip"; id: string; timestamp: string; tripNumber: string; vehicleSummary: string };
 
 // tripSheet.repository.js#list has no `finalized_at` entry in its own
 // SORT_WHITELIST (only trip_date/created_at/total_km/net_payable_paise
@@ -41,7 +41,12 @@ export function RecentActivityWidget() {
         id: t.id,
         timestamp: t.finalized_at ?? t.trip_date,
         tripNumber: t.trip_sheet_number,
-        vehicleNumber: t.snapshot_vehicle_number,
+        // Task B1: a trip can have up to 10 vehicles now — summarize
+        // (first vehicle + count), don't assume a single scalar.
+        vehicleSummary:
+          t.vehicle_count > 1
+            ? `${t.first_vehicle_number ?? "—"} +${t.vehicle_count - 1} more`
+            : (t.first_vehicle_number ?? "—"),
       }),
     ),
   ].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
@@ -90,7 +95,7 @@ export function RecentActivityWidget() {
               </div>
 
               <span className="shrink-0 text-right text-gray-600">
-                {event.type === "invoice" ? formatPaiseAsRupees(event.amountPaise) : event.vehicleNumber}
+                {event.type === "invoice" ? formatPaiseAsRupees(event.amountPaise) : event.vehicleSummary}
               </span>
             </button>
           ))}

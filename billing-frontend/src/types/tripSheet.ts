@@ -13,7 +13,8 @@ export type PricingSource = "FLEET" | "MANUAL";
 // with-parent (see tripToll.repository.js's own comment); an edit
 // resends the FULL desired tolls array and the backend atomically
 // deletes+reinserts, so the frontend never needs to track
-// created/removed toll ids across an edit.
+// created/removed toll ids across an edit. Stayed SHEET-level under
+// Task B1 (not per-vehicle).
 export interface TripToll {
   id: string;
   trip_sheet_id: string;
@@ -29,24 +30,16 @@ export interface TripToll {
   created_at: string;
 }
 
-// Full single-trip shape (GET /trips/:id) — matches trip_sheets
-// exactly (Task 3.1 migration). service_type/billing_mode are TWO
-// INDEPENDENT axes, not one 3-way "type" — see lib/constants/enums.ts's
-// comment.
-export interface TripSheet {
+// One vehicle's worth of a trip sheet (Task B1: trip_sheet_vehicles
+// child table, 1-10 rows per sheet). Matches the DB table exactly —
+// every field the old single-vehicle `TripSheet` interface used to
+// carry as its own scalars now lives here instead.
+export interface TripSheetVehicle {
   id: string;
   tenant_id: string;
-  trip_sheet_number: string;
-  service_type: TripServiceType;
-  billing_mode: TripBillingMode;
-  status: TripStatus;
-  // Nullable as of the trip-sheets-proforma-pdf migration — a trip may
-  // have a real customer, a free-text manual_customer_name, or
-  // neither ("no customer specified").
-  customer_id: string | null;
-  manual_customer_name: string | null;
-  // Nullable for MANUAL-mode trips (trip-sheets-manual-mode migration
-  // dropped the NOT NULL constraint) — always non-null for FLEET.
+  trip_sheet_id: string;
+  line_number: number;
+
   vehicle_id: string | null;
   driver_id: string | null;
   pricing_rule_id: string | null;
@@ -54,10 +47,6 @@ export interface TripSheet {
 
   snapshot_vehicle_number: string;
   snapshot_vehicle_type: VehicleType;
-  // Nullable in step with customer_id above — null only when the trip
-  // genuinely has no customer at all (not even a free-text name).
-  snapshot_customer_name: string | null;
-  snapshot_customer_gstin: string | null;
 
   snap_base_hours: number | null;
   snap_base_km: number | null;
@@ -70,7 +59,6 @@ export interface TripSheet {
   snap_per_km_rate_paise: number | null;
   snap_performance_batta_paise: number | null;
 
-  trip_date: string;
   start_datetime: string | null;
   end_datetime: string | null;
   opening_km: number | null;
@@ -92,6 +80,39 @@ export interface TripSheet {
   gross_paise: number;
   net_payable_paise: number;
   breakdown: { label: string; value_paise: number; detail?: string }[];
+
+  created_at: string;
+}
+
+// Full single-trip shape (GET /trips/:id) — matches trip_sheets exactly
+// post-Task-B1 restructure. service_type/billing_mode are TWO
+// INDEPENDENT axes, not one 3-way "type" — see lib/constants/enums.ts's
+// comment. Every per-vehicle field (usage, charges, computed totals,
+// driver/vehicle identity) moved to the `vehicles` array — this is now
+// purely sheet-level identity/customer/lifecycle/PDF-tracking data.
+export interface TripSheet {
+  id: string;
+  tenant_id: string;
+  trip_sheet_number: string;
+  service_type: TripServiceType;
+  billing_mode: TripBillingMode;
+  status: TripStatus;
+  // Nullable as of the trip-sheets-proforma-pdf migration — a trip may
+  // have a real customer, a free-text manual_customer_name, or
+  // neither ("no customer specified").
+  customer_id: string | null;
+  manual_customer_name: string | null;
+  // Nullable in step with customer_id above — null only when the trip
+  // genuinely has no customer at all (not even a free-text name).
+  snapshot_customer_name: string | null;
+  snapshot_customer_gstin: string | null;
+
+  trip_date: string;
+
+  // Task B1: 1-10 vehicles, and the sheet-level sum of their
+  // net_payable_paise.
+  vehicle_count: number;
+  total_net_payable_paise: number;
 
   booked_by: string | null;
   pax_note: string | null;
@@ -115,13 +136,15 @@ export interface TripSheet {
   cancelled_by: string | null;
   cancellation_reason: string | null;
 
+  vehicles: TripSheetVehicle[];
   tolls: TripToll[];
 }
 
-// Narrower projection returned by GET /trips (list) — deliberately
-// omits breakdown/snap_*/tolls (tripSheet.repository.js#list's own
-// comment: "keeping the list payload small"). Do NOT assume list rows
-// have the fields only the detail response carries.
+// Narrower projection returned by GET /trips (list) — Task B1: no
+// per-vehicle scalars (a sheet can have N vehicles now), so the list
+// row carries vehicle_count plus a "first vehicle" summary
+// (tripSheet.repository.js#list's own LATERAL join) instead. Full
+// per-vehicle detail is GET /trips/:id only.
 export interface TripSheetListRow {
   id: string;
   tenant_id: string;
@@ -130,21 +153,16 @@ export interface TripSheetListRow {
   billing_mode: TripBillingMode;
   status: TripStatus;
   customer_id: string | null;
-  vehicle_id: string | null;
-  driver_id: string | null;
-  pricing_source: PricingSource;
-  snapshot_vehicle_number: string;
-  snapshot_vehicle_type: VehicleType;
   snapshot_customer_name: string | null;
   snapshot_customer_gstin: string | null;
   trip_date: string;
-  total_km: number;
-  total_hours: number;
-  total_days: number;
-  subtotal_paise: number;
-  gross_paise: number;
-  net_payable_paise: number;
-  advance_paise: number;
+  vehicle_count: number;
+  total_net_payable_paise: number;
+  first_vehicle_id: string | null;
+  first_vehicle_number: string | null;
+  first_vehicle_type: VehicleType | null;
+  first_vehicle_pricing_source: PricingSource | null;
+  sum_total_km: number;
   finalized_at: string | null;
   cancelled_at: string | null;
   invoice_id: string | null;
@@ -172,9 +190,7 @@ export interface TripSheetListResponse {
   pagination: { total: number; limit: number; offset: number; has_more: boolean };
   aggregates: {
     sum_net_payable_paise: number;
-    sum_gross_paise: number;
     count_by_status: Record<TripStatus, number>;
     sum_net_payable_rupees: string;
-    sum_gross_rupees: string;
   };
 }

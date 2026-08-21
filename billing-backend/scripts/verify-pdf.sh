@@ -156,9 +156,13 @@ fi
 
 new_trip() {
   # $1=service_type $2=billing_mode $3=customer $4=vehicle $5=date $6=km $7=hours $8=extra_json(optional)
+  # Task B1: vehicle_id/total_km/total_hours and $8's extra fields
+  # (total_days, fasttag_rupees, etc.) all live inside vehicles[0] now
+  # — this single-vehicle helper wraps them, same customer/date/service
+  # fields staying sheet-level.
   local extra="${8:-}"
   curl -s -X POST "$BASE_URL/trips" -H "Authorization: Bearer $OWNER_A_TOKEN" -H "Content-Type: application/json" \
-    -d "{\"service_type\":\"$1\",\"billing_mode\":\"$2\",\"customer_id\":\"$3\",\"vehicle_id\":\"$4\",\"trip_date\":\"$5\",\"total_km\":$6,\"total_hours\":$7${extra}}" \
+    -d "{\"service_type\":\"$1\",\"billing_mode\":\"$2\",\"customer_id\":\"$3\",\"trip_date\":\"$5\",\"vehicles\":[{\"vehicle_id\":\"$4\",\"total_km\":$6,\"total_hours\":$7${extra}}]}" \
     | jq -r '.trip.id // empty'
 }
 finalize_trip() { curl -s -X POST "$BASE_URL/trips/$1/finalize" -H "Authorization: Bearer $OWNER_A_TOKEN" > /dev/null; }
