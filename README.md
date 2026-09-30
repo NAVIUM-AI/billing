@@ -20,8 +20,11 @@ Anchored by real client [Pravasi Tours & Travels](https://pravasitoursandtravels
 ### Try it — demo credentials
 
 Log into a public demo tenant:
+| | |
+|---|---|
+| **Email** | `anilgehlotn@gmail.com` |
+| **Password** | `PravasiTours@2026` |
 
-> ⚠️ This is a shared demo tenant. Data may be reset periodically. Please don't upload any real business data.
 
 ### 5-minute walkthrough
 
